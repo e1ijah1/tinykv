@@ -105,7 +105,7 @@ func TestLeaderBcastBeat2AA(t *testing.T) {
 		{From: 1, To: 3, Term: 1, MsgType: pb.MessageType_MsgHeartbeat},
 	}
 	if !reflect.DeepEqual(msgs, wmsgs) {
-		t.Errorf("msgs = %v, want %v", msgs, wmsgs)
+		t.Errorf("msgs = %+v, want %+v", msgs, wmsgs)
 	}
 }
 
@@ -142,7 +142,8 @@ func testNonleaderStartElection(t *testing.T, state StateType) {
 	}
 
 	if r.Term != 2 {
-		t.Errorf("term = %d, want 2", r.Term)
+		t.Errorf("term = %d, want 2, elapsed %d, timeout %d", r.Term,
+			r.electionElapsed, r.electionTimeout)
 	}
 	if r.State != StateCandidate {
 		t.Errorf("state = %s, want %s", r.State, StateCandidate)
@@ -157,7 +158,7 @@ func testNonleaderStartElection(t *testing.T, state StateType) {
 		{From: 1, To: 3, Term: 2, MsgType: pb.MessageType_MsgRequestVote},
 	}
 	if !reflect.DeepEqual(msgs, wmsgs) {
-		t.Errorf("msgs = %v, want %v", msgs, wmsgs)
+		t.Errorf("msgs = %+v, want %+v", msgs, wmsgs)
 	}
 }
 
