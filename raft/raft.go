@@ -190,8 +190,6 @@ type Raft struct {
 
 	randomizedElectionTimeout int
 	mu                        sync.RWMutex
-
-	step stepFunc
 }
 
 // newRaft return a raft peer with the given config
@@ -319,7 +317,7 @@ func (r *Raft) tick() {
 	case StateFollower:
 		r.electionElapsed++
 
-		if r.electionElapsed >= r.electionTimeout {
+		if r.electionElapsed >= r.randomizedElectionTimeout {
 			r.electionElapsed = 0
 			err := r.Step(pb.Message{From: r.id, MsgType: pb.MessageType_MsgHup})
 			if err != nil {
@@ -344,7 +342,6 @@ func (r *Raft) tick() {
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
-	r.step = stepFollower
 	r.reset(term)
 
 	r.Lead = lead
@@ -360,7 +357,6 @@ func (r *Raft) becomeCandidate() {
 		log.Panicf("node %d's invalid state %s before become candidate", r.id, r.State)
 		return
 	}
-	r.step = stepCandidate
 	r.reset(r.Term + 1)
 	r.State = StateCandidate
 	r.Vote = r.id
@@ -376,7 +372,6 @@ func (r *Raft) becomeLeader() {
 		log.Panicf("node %d's state must be candidate before become leader", r.id)
 		return
 	}
-	r.step = stepLeader
 	r.reset(r.Term)
 	r.State = StateLeader
 	r.Lead = r.id
@@ -399,6 +394,16 @@ func (r *Raft) reset(term uint64) {
 	r.resetRandomElectionTimeout()
 
 	r.Lead = None
+
+	r.votes = map[uint64]bool{}
+
+	for id := range r.Prs {
+		r.Prs[id].Next = r.RaftLog.LastIndex() + 1
+		r.Prs[id].Match = 0
+		if id == r.id {
+			r.Prs[id].Match = r.RaftLog.LastIndex()
+		}
+	}
 }
 
 func (r *Raft) appendEntry(es ...pb.Entry) bool {
@@ -470,10 +475,18 @@ func (r *Raft) Step(m pb.Message) error {
 			r.send(pb.Message{To: m.From, Term: r.Term, MsgType: pb.MessageType_MsgRequestVoteResponse, Reject: true})
 		}
 	default:
-		if err := r.step(r, m); err != nil {
+		var step stepFunc
+		switch r.State {
+		case StateLeader:
+			step = stepLeader
+		case StateCandidate:
+			step = stepCandidate
+		case StateFollower:
+			step = stepFollower
+		}
+		if err := step(r, m); err != nil {
 			return err
 		}
-
 	}
 	return nil
 }
