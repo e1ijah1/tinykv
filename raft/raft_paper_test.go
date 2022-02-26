@@ -27,6 +27,7 @@ package raft
 
 import (
 	"fmt"
+	"log"
 	"reflect"
 	"sort"
 	"testing"
@@ -903,7 +904,7 @@ func commitNoopEntry(r *Raft, s *MemoryStorage) {
 	msgs := r.readMessages()
 	for _, m := range msgs {
 		if m.MsgType != pb.MessageType_MsgAppend || len(m.Entries) != 1 || m.Entries[0].Data != nil {
-			panic("not a message to append noop entry")
+			log.Panicf("not a message to append noop entry, len %d", len(m.Entries))
 		}
 		r.Step(acceptAndReply(m))
 	}

@@ -598,7 +598,27 @@ func stepLeader(r *Raft, m pb.Message) error {
 		r.bcastHeartbeat()
 		return nil
 	case pb.MessageType_MsgPropose:
-		//todo
+		if len(m.Entries) < 1 {
+			log.Panicf("node %d stepped empty MsgProp", r.id)
+		}
+		if r.Prs[r.id] == nil {
+			return ErrProposalDropped
+		}
+		if r.leadTransferee != None {
+			log.Debugf("node %d [term %d] transfer leadership to %d is in progress; dropping proposal", r.id, r.Term, r.leadTransferee)
+			return ErrProposalDropped
+		}
+		//todo config change
+
+		entries := make([]pb.Entry, 0, len(m.Entries))
+		for _, e := range m.Entries {
+			entries = append(entries, *e)
+		}
+		if !r.appendEntry(entries...) {
+			return ErrProposalDropped
+		}
+		r.bcastAppend()
+		return nil
 	}
 
 	pr := r.Prs[m.From]
