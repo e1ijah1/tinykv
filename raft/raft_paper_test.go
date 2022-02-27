@@ -687,6 +687,7 @@ func TestLeaderSyncFollowerLog2AB(t *testing.T) {
 		{Term: 4, Index: 4}, {Term: 4, Index: 5},
 		{Term: 5, Index: 6}, {Term: 5, Index: 7},
 		{Term: 6, Index: 8}, {Term: 6, Index: 9}, {Term: 6, Index: 10},
+		// ld: {term: 9, index: 11, noop}
 	}
 	term := uint64(8)
 	tests := [][]pb.Entry{

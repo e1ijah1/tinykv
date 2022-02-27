@@ -65,10 +65,7 @@ type RaftLog struct {
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
-	l := &RaftLog{
-		storage: storage,
-		entries: make([]pb.Entry, 0),
-	}
+
 	fi, err := storage.FirstIndex()
 	if err != nil {
 		log.Panicf("get first index from storage err %v", err)
@@ -77,11 +74,21 @@ func newLog(storage Storage) *RaftLog {
 	if err != nil {
 		log.Panicf("get last index from storage err %v", err)
 	}
+	entries, err := storage.Entries(fi, li+1)
+	if err != nil {
+		log.Panicf("get entries from storage err %v", err)
+	}
 
-	l.offset = li + 1
-	l.committed = fi - 1
-	l.applied = fi - 1
-	return l
+	return &RaftLog{
+		storage:   storage,
+		committed: fi - 1,
+		applied:   fi - 1,
+		stabled:   li,
+		entries:   entries,
+		// offset 表示 unstable log index 与 entries array 中的 index 的差值
+		// entries[i] 的 index 为 i + offset
+		offset: 1,
+	}
 }
 
 // We need to compact the log entries in some point of time like
@@ -94,21 +101,42 @@ func (l *RaftLog) maybeCompact() {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
+	if l.stabled >= uint64(len(l.entries)) {
+		return []pb.Entry{}
+	}
 	return l.entries[l.stabled:]
 }
 
 // nextEnts returns all the committed but not applied entries
-func (l *RaftLog) nextEnts() (ents []pb.Entry) {
+func (l *RaftLog) nextEnts() []pb.Entry {
 	// Your Code Here (2A).
-	return l.entries[l.applied+1 : l.committed+1]
+	offset := max(l.applied+1, l.firstIndex())
+	if l.committed+1 > offset {
+		ents, err := l.slice(offset, l.committed+1)
+		if err != nil {
+			log.Panicf("unexpected error when slice entries %v", err)
+		}
+		return ents
+	}
+	return nil
 }
 
 func (l *RaftLog) firstIndex() uint64 {
+	if i, ok := l.firstUnstableIndex(); ok {
+		return i
+	}
 	i, err := l.storage.FirstIndex()
 	if err != nil {
 		log.Panicf("get first index from storage error: %v", err)
 	}
 	return i
+}
+
+func (l *RaftLog) firstUnstableIndex() (uint64, bool) {
+	if l.pendingSnapshot != nil {
+		return l.pendingSnapshot.Metadata.Index + 1, true
+	}
+	return 0, false
 }
 
 func (l *RaftLog) lastUnstableIndex() (uint64, bool) {
@@ -244,7 +272,12 @@ func (l *RaftLog) getEntries(i uint64) ([]*pb.Entry, error) {
 	}
 	ret := make([]*pb.Entry, 0, len(ents))
 	for _, e := range ents {
-		ret = append(ret, &e)
+		ret = append(ret, &pb.Entry{
+			EntryType: e.EntryType,
+			Term:      e.Term,
+			Index:     e.Index,
+			Data:      e.Data,
+		})
 	}
 	return ret, nil
 }
@@ -383,7 +416,23 @@ func (l *RaftLog) maybeAppend(index, logTerm, committed uint64, entsPtr ...*pb.E
 			if ci-offset > uint64(len(ents)) {
 				log.Panicf("index, %d, is out of range [%d]", ci-offset, len(ents))
 			}
-			l.append(ents[ci-offset:]...)
+			after := ents[0].Index
+			if after-1 < l.committed {
+				log.Panicf("after %d is out of range [committed %d]", after, l.committed)
+			}
+			switch {
+			case after == l.offset+uint64(len(l.entries)):
+				l.entries = append(l.entries, ents...)
+			case after <= l.offset:
+				l.offset = after
+				l.entries = ents
+				l.stabled = 0
+			default:
+				// 5.3 This means that conﬂicting entries in follower logs will be overwritten with entries from the leader’s log.
+				l.stabled = after - l.offset
+				l.entries = append([]pb.Entry{}, l.entries[0:after-l.offset]...)
+				l.entries = append(l.entries, ents...)
+			}
 		}
 		l.commitTo(min(committed, lastnewi))
 		return lastnewi, true

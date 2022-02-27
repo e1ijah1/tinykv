@@ -376,10 +376,16 @@ func (r *Raft) becomeLeader() {
 	r.State = StateLeader
 	r.Lead = r.id
 
-	emptyEnt := pb.Entry{Data: nil}
-	if !r.appendEntry(emptyEnt) {
+	noopEnt := pb.Entry{
+		EntryType: pb.EntryType_EntryNormal,
+		Term:      r.Term,
+		Index:     r.RaftLog.LastIndex() + 1,
+	}
+	if !r.appendEntry(noopEnt) {
 		log.Panicf("node %d append noop entry failed", r.id)
 	}
+	log.Infof("node %d become leader at term %d, try send noop log to all followers, index: %d, term: %d",
+		r.id, r.Term, noopEnt.Index, noopEnt.Term)
 
 	log.Debugf("node %d became leader at term %d", r.id, r.Term)
 }
@@ -448,7 +454,7 @@ func (r *Raft) resetRandomElectionTimeout() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-
+	log.Infof("node %d (%d %v)receive msg %+v", r.id, r.Term, r.State, m)
 	if m.Term < r.Term && (m.MsgType == pb.MessageType_MsgHeartbeat || m.MsgType == pb.MessageType_MsgAppend) {
 		// ignore the message which has a lower term
 		// r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse})
@@ -494,7 +500,7 @@ func (r *Raft) Step(m pb.Message) error {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
-	if m.Index <= r.RaftLog.committed {
+	if m.Index < r.RaftLog.committed {
 		r.send(pb.Message{To: m.From, Index: r.RaftLog.committed, MsgType: pb.MessageType_MsgAppendResponse})
 		return
 	}
@@ -629,15 +635,15 @@ func stepLeader(r *Raft, m pb.Message) error {
 
 	switch m.MsgType {
 	case pb.MessageType_MsgAppendResponse:
+		// if reject then retry
 		if m.Reject {
-			// fixme optimize rejection
 			nextProbeIdx := m.Index
 			if m.LogTerm > 0 {
 				nextProbeIdx = r.RaftLog.findConflictByTerm(m.Index, m.LogTerm)
 			}
-			if pr.maybeDecrTo(m.Index, nextProbeIdx) {
-				r.sendAppend(m.From)
-			}
+			pr.Next = max(nextProbeIdx+1, 1)
+			r.sendAppend(m.From)
+
 		} else {
 			if pr.maybeUpdate(m.Index) {
 				if r.maybeCommit() {
