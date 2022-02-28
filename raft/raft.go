@@ -207,6 +207,22 @@ func newRaft(c *Config) *Raft {
 		Lead:             None,
 		RaftLog:          newLog(c.Storage),
 	}
+	hs, cs, err := c.Storage.InitialState()
+	if err != nil {
+		log.Panicf("node %d get init state failed, %v", r.id, err)
+	}
+	// reset from storage
+	r.Vote = hs.Vote
+	r.RaftLog.committed = hs.Commit
+	r.Term = hs.Term
+	if r.Term == 0 {
+		r.Term = r.RaftLog.LastTerm()
+	}
+
+	if c.peers == nil {
+		c.peers = cs.Nodes
+	}
+
 	for _, pid := range c.peers {
 		r.Prs[pid] = &Progress{
 			Match: 0,
@@ -218,18 +234,9 @@ func newRaft(c *Config) *Raft {
 		}
 	}
 
-	r.becomeFollower(0, None)
+	r.resetRandomElectionTimeout()
+	r.State = StateFollower
 	return r
-}
-
-func (r *Raft) initFromStorage(storage Storage) {
-	hs, _, err := storage.InitialState()
-	if err != nil {
-		log.Panicf("node %d get init state failed, %v", r.id, err)
-	}
-	r.Term = hs.Term
-	r.Vote = hs.Vote
-
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
@@ -384,7 +391,7 @@ func (r *Raft) becomeLeader() {
 	if !r.appendEntry(noopEnt) {
 		log.Panicf("node %d append noop entry failed", r.id)
 	}
-	log.Infof("node %d become leader at term %d, try send noop log to all followers, index: %d, term: %d",
+	log.Debugf("node %d become leader at term %d, try send noop log to all followers, index: %d, term: %d",
 		r.id, r.Term, noopEnt.Index, noopEnt.Term)
 
 	log.Debugf("node %d became leader at term %d", r.id, r.Term)
@@ -454,7 +461,8 @@ func (r *Raft) resetRandomElectionTimeout() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-	log.Infof("node %d (%d %v)receive msg %+v", r.id, r.Term, r.State, m)
+	log.Debugf("node %d (%d %v, vote: %d)receive msg %+v",
+		r.id, r.Term, r.State, r.Vote, m)
 	if m.Term < r.Term && (m.MsgType == pb.MessageType_MsgHeartbeat || m.MsgType == pb.MessageType_MsgAppend) {
 		// ignore the message which has a lower term
 		// r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse})
@@ -650,7 +658,7 @@ func stepLeader(r *Raft, m pb.Message) error {
 					r.bcastAppend()
 				}
 
-				for r.maybeSendAppend(m.From, false) {
+				if r.maybeSendAppend(m.From, false) {
 				}
 
 				if m.From == r.leadTransferee && pr.Match == r.RaftLog.LastIndex() {

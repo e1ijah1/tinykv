@@ -28,10 +28,13 @@ package raft
 import (
 	"fmt"
 	"log"
+	"os"
 	"reflect"
 	"sort"
+	"strconv"
 	"testing"
 
+	kvlog "github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -847,6 +850,21 @@ func TestVoter2AB(t *testing.T) {
 		if m.Reject != tt.wreject {
 			t.Errorf("#%d: reject = %t, want %t", i, m.Reject, tt.wreject)
 		}
+	}
+}
+
+func init() {
+	debug := false
+	s := os.Getenv("DEBUG")
+	ok, err := strconv.ParseBool(s)
+	if err == nil {
+		debug = ok
+	}
+	if len(s) < 1 {
+		debug = true
+	}
+	if debug {
+		kvlog.SetLevel(kvlog.LOG_LEVEL_DEBUG)
 	}
 }
 
