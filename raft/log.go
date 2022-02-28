@@ -91,6 +91,10 @@ func newLog(storage Storage) *RaftLog {
 	}
 }
 
+func (l *RaftLog) hasPendingSnapshot() bool {
+	return l.pendingSnapshot != nil && !IsEmptySnap(l.pendingSnapshot)
+}
+
 // We need to compact the log entries in some point of time like
 // storage compact stabled log entries prevent the log entries
 // grow unlimitedly in memory
@@ -107,6 +111,12 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 	return l.entries[l.stabled:]
 }
 
+func (l *RaftLog) hasNextEnts() bool {
+	// check if has committed but not applied entries
+	offset := max(l.applied+1, l.firstIndex())
+	return l.committed > offset
+}
+
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() []pb.Entry {
 	// Your Code Here (2A).
@@ -119,6 +129,47 @@ func (l *RaftLog) nextEnts() []pb.Entry {
 		return ents
 	}
 	return nil
+}
+
+func (l *RaftLog) appliedTo(i uint64) {
+	if i == 0 {
+		return
+	}
+	if l.committed < i || i < l.applied {
+		log.Panicf("raftlog: applied out of range, committed: %d applied: %d, appliedto: %d", l.committed, l.applied, i)
+	}
+	l.applied = i
+}
+
+func (l *RaftLog) stableSnapTo(i uint64) {
+	if l.pendingSnapshot != nil && l.pendingSnapshot.Metadata.Index == i {
+		l.pendingSnapshot = nil
+	}
+}
+
+func (l *RaftLog) stableTo(i, t uint64) {
+	gt, ok := l.unstableTerm(i)
+	if !ok {
+		return
+	}
+	if gt == t && i >= l.offset {
+		l.entries = l.entries[i-l.offset+1:]
+		l.offset = i + 1
+		l.shrinkUnstableEntriesArray()
+		l.stabled = 0
+	}
+}
+
+// shrink underlying array size
+func (l *RaftLog) shrinkUnstableEntriesArray() {
+	const lenMul = 2
+	if len(l.entries) == 0 {
+		l.entries = nil
+	} else if len(l.entries)*lenMul < cap(l.entries) {
+		newEntries := make([]pb.Entry, len(l.entries))
+		copy(newEntries, l.entries)
+		l.entries = newEntries
+	}
 }
 
 func (l *RaftLog) firstIndex() uint64 {

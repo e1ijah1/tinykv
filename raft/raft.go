@@ -246,6 +246,21 @@ func (r *Raft) sendAppend(to uint64) bool {
 	return r.maybeSendAppend(to, true)
 }
 
+func (r *Raft) softState() *SoftState {
+	return &SoftState{
+		Lead:      r.Lead,
+		RaftState: r.State,
+	}
+}
+
+func (r *Raft) hardState() pb.HardState {
+	return pb.HardState{
+		Term:   r.Term,
+		Vote:   r.Vote,
+		Commit: r.RaftLog.committed,
+	}
+}
+
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
 	// Your Code Here (2A).
@@ -833,4 +848,17 @@ func (r *Raft) restore(snap *pb.Snapshot) bool {
 	pr := r.Prs[r.id]
 	pr.maybeUpdate(pr.Next - 1)
 	return true
+}
+
+func (r *Raft) advance(rd Ready) {
+	if newApplied := rd.appliedCursor(); newApplied > 0 {
+		r.RaftLog.appliedTo(newApplied)
+	}
+	if len(rd.Entries) > 0 {
+		e := rd.Entries[len(rd.Entries)-1]
+		r.RaftLog.stableTo(e.Index, e.Term)
+	}
+	if !IsEmptySnap(&rd.Snapshot) {
+		r.RaftLog.stableSnapTo(rd.Snapshot.Metadata.Index)
+	}
 }
