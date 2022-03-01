@@ -43,6 +43,26 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return
 	}
 	// Your Code Here (2B).
+	if !d.RaftGroup.HasReady() {
+		return
+	}
+	rd := d.RaftGroup.Ready()
+	result, err := d.peerStorage.SaveReadyState(&rd)
+	if err != nil {
+		log.Fatalf("[region %d] save ready state failed %v", d.regionId, err)
+	}
+	if result != nil && !util.RegionEqual(result.PrevRegion, result.Region) {
+		d.peerStorage.SetRegion(result.Region)
+		//todo btree replace region
+	}
+
+	d.Send(d.ctx.trans, rd.Messages)
+
+	if len(rd.CommittedEntries) > 0 {
+
+	}
+
+	d.RaftGroup.Advance(rd)
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -114,6 +134,27 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	// Your Code Here (2B).
+	if msg.AdminRequest != nil {
+		switch msg.AdminRequest.CmdType {
+		case raft_cmdpb.AdminCmdType_ChangePeer:
+		case raft_cmdpb.AdminCmdType_CompactLog:
+		case raft_cmdpb.AdminCmdType_Split:
+		case raft_cmdpb.AdminCmdType_TransferLeader:
+		default:
+
+		}
+	}
+
+	for _, req := range msg.Requests {
+		switch req.CmdType {
+		case raft_cmdpb.CmdType_Get:
+		case raft_cmdpb.CmdType_Put:
+		case raft_cmdpb.CmdType_Delete:
+		case raft_cmdpb.CmdType_Snap:
+		default:
+
+		}
+	}
 }
 
 func (d *peerMsgHandler) onTick() {
