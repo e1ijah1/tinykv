@@ -92,8 +92,8 @@ func (rd Ready) appliedCursor() uint64 {
 	if n := len(rd.CommittedEntries); n > 0 {
 		return rd.CommittedEntries[n-1].Index
 	}
-	if index := rd.Snapshot.Metadata.Index; index > 0 {
-		return index
+	if rd.Snapshot.Metadata != nil && rd.Snapshot.Metadata.Index > 0 {
+		return rd.Snapshot.Metadata.Index
 	}
 	return 0
 }
@@ -224,6 +224,10 @@ func (rn *RawNode) Advance(rd Ready) {
 	if !IsEmptyHardState(rd.HardState) {
 		rn.prevHardSt = rd.HardState
 	}
+	if rd.SoftState != nil && !rd.SoftState.equal(&SoftState{}) {
+		rn.prevSoftSt = rd.SoftState
+	}
+
 	rn.Raft.advance(rd)
 }
 

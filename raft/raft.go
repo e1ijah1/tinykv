@@ -315,7 +315,7 @@ func (r *Raft) campaign() {
 	}
 	r.becomeCandidate()
 
-	if _, _, res := r.poll(r.id, true); res == VoteWon {
+	if gr, _ := r.poll(r.id, true); gr >= r.quorum() {
 		r.becomeLeader()
 		return
 	}
@@ -369,7 +369,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.Lead = lead
 	r.State = StateFollower
 
-	log.Debugf("node %d became follower at term %d", r.id, r.Term)
+	log.Debugf("node %d became follower at term %d, vote: %d", r.id, r.Term, r.Vote)
 }
 
 // becomeCandidate transform this peer's state to candidate
@@ -398,7 +398,7 @@ func (r *Raft) becomeLeader() {
 	r.State = StateLeader
 	r.Lead = r.id
 
-	noopEnt := pb.Entry{
+	noopEnt := &pb.Entry{
 		EntryType: pb.EntryType_EntryNormal,
 		Term:      r.Term,
 		Index:     r.RaftLog.LastIndex() + 1,
@@ -410,6 +410,7 @@ func (r *Raft) becomeLeader() {
 		r.id, r.Term, noopEnt.Index, noopEnt.Term)
 
 	log.Debugf("node %d became leader at term %d", r.id, r.Term)
+	r.bcastAppend()
 }
 
 func (r *Raft) reset(term uint64) {
@@ -434,7 +435,7 @@ func (r *Raft) reset(term uint64) {
 	}
 }
 
-func (r *Raft) appendEntry(es ...pb.Entry) bool {
+func (r *Raft) appendEntry(es ...*pb.Entry) bool {
 	li := r.RaftLog.LastIndex()
 	for i := range es {
 		es[i].Term = r.Term
@@ -528,26 +529,42 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		return
 	}
 
-	if mlastIndex, ok := r.RaftLog.maybeAppend(m.Index, m.LogTerm, m.Commit, m.Entries...); ok {
-		r.send(pb.Message{To: m.From, Index: mlastIndex, MsgType: pb.MessageType_MsgAppendResponse})
-	} else {
-		log.Debugf("%x [logterm: %d, index: %d] rejected MsgApp [logterm: %d, index: %d] from %x",
-			r.id, r.RaftLog.zeroTermOnErrCompacted(r.RaftLog.Term(m.Index)), m.Index, m.LogTerm, m.Index, m.From)
-
-		hintIndex := min(m.Index, r.RaftLog.LastIndex())
-		hintIndex = r.RaftLog.findConflictByTerm(hintIndex, m.LogTerm)
-		hintTerm, err := r.RaftLog.Term(hintIndex)
-		if err != nil {
-			log.Panicf("term(%d) must be valid, but got %v", hintIndex, err)
-		}
+	// check log consistency
+	localTerm, _ := r.RaftLog.Term(m.Index)
+	if m.LogTerm != localTerm {
 		r.send(pb.Message{
-			To:      m.From,
 			MsgType: pb.MessageType_MsgAppendResponse,
-			Index:   hintIndex,
+			To:      m.From,
+			Term:    r.Term,
+			LogTerm: localTerm,
+			Index:   r.RaftLog.LastIndex(),
 			Reject:  true,
-			LogTerm: hintTerm,
 		})
+		return
 	}
+
+	// handle log conflicts
+	for i, ent := range m.Entries {
+		if ent.Index < r.RaftLog.firstLogIndex {
+			continue
+		} else if r.RaftLog.firstLogIndex <= ent.Index && ent.Index <= r.RaftLog.LastIndex() {
+			localTerm, _ := r.RaftLog.Term(ent.Index)
+			if ent.Term != localTerm {
+				r.RaftLog.deleteFromIndex(ent.Index)
+				r.RaftLog.append(ent)
+				r.RaftLog.stabled = min(r.RaftLog.stabled, ent.Index-1)
+			}
+		} else {
+			r.RaftLog.append(m.Entries[i:]...)
+			break
+		}
+	}
+
+	if m.Commit > r.RaftLog.committed {
+		r.RaftLog.committed = min(m.Commit, m.Index+uint64(len(m.Entries)))
+	}
+
+	r.send(pb.Message{MsgType: pb.MessageType_MsgAppendResponse, To: m.From, Term: r.Term, Index: r.RaftLog.LastIndex(), Reject: false})
 }
 
 func (r *Raft) send(m pb.Message) {
@@ -627,26 +644,23 @@ func stepLeader(r *Raft, m pb.Message) error {
 		r.bcastHeartbeat()
 		return nil
 	case pb.MessageType_MsgPropose:
-		if len(m.Entries) < 1 {
-			log.Panicf("node %d stepped empty MsgProp", r.id)
-		}
-		if r.Prs[r.id] == nil {
-			return ErrProposalDropped
-		}
 		if r.leadTransferee != None {
 			log.Debugf("node %d [term %d] transfer leadership to %d is in progress; dropping proposal", r.id, r.Term, r.leadTransferee)
 			return ErrProposalDropped
 		}
-		//todo config change
+		if len(m.Entries) < 1 {
+			log.Panicf("node %d stepped empty MsgProp", r.id)
+		}
+		r.RaftLog.appendEntriesWithTerm(m.Entries, r.Term, &r.PendingConfIndex)
 
-		entries := make([]pb.Entry, 0, len(m.Entries))
-		for _, e := range m.Entries {
-			entries = append(entries, *e)
-		}
-		if !r.appendEntry(entries...) {
-			return ErrProposalDropped
-		}
 		r.bcastAppend()
+
+		li := r.RaftLog.LastIndex()
+		r.Prs[r.id].Match = li
+		r.Prs[r.id].Next = li + 1
+		if len(r.Prs) < 2 {
+			r.RaftLog.commitTo(li)
+		}
 		return nil
 	}
 
@@ -664,11 +678,12 @@ func stepLeader(r *Raft, m pb.Message) error {
 			if m.LogTerm > 0 {
 				nextProbeIdx = r.RaftLog.findConflictByTerm(m.Index, m.LogTerm)
 			}
-			pr.Next = max(nextProbeIdx+1, 1)
+			pr.Next = max(nextProbeIdx, 1)
 			r.sendAppend(m.From)
 
 		} else {
 			if pr.maybeUpdate(m.Index) {
+				// update commit after majroity nodes received log
 				if r.maybeCommit() {
 					r.bcastAppend()
 				}
@@ -705,15 +720,14 @@ func stepCandidate(r *Raft, m pb.Message) error {
 		r.becomeFollower(m.Term, m.From)
 		r.handleSnapshot(m)
 	case pb.MessageType_MsgRequestVoteResponse:
-		gr, rj, res := r.poll(m.From, !m.Reject)
+		gr, rj := r.poll(m.From, !m.Reject)
 		log.Debugf("node %x has received %d votes and %d vote rejections", r.id, gr, rj)
-		switch res {
-		case VoteWon:
+		if gr >= r.quorum() {
 			r.becomeLeader()
-			r.bcastAppend()
-		case VoteLost:
+		} else if rj >= r.quorum() {
 			r.becomeFollower(r.Term, None)
 		}
+
 	default:
 		log.Debugf("node %d stepCandidate ignore msg %s", r.id, m.MsgType)
 	}
@@ -755,7 +769,7 @@ func stepFollower(r *Raft, m pb.Message) error {
 	return nil
 }
 
-func (r *Raft) poll(id uint64, v bool) (granted int, rejected int, res VoteResult) {
+func (r *Raft) poll(id uint64, v bool) (granted int, rejected int) {
 
 	log.Debugf("node %x received vote %v from %x at term %d", r.id, v, id, r.Term)
 
@@ -763,11 +777,10 @@ func (r *Raft) poll(id uint64, v bool) (granted int, rejected int, res VoteResul
 		r.votes[id] = v
 	}
 	// TallyVotes
-	missing := 0
+
 	for id := range r.Prs {
 		v, ok := r.votes[id]
 		if !ok {
-			missing++
 			continue
 		}
 		if v {
@@ -776,15 +789,6 @@ func (r *Raft) poll(id uint64, v bool) (granted int, rejected int, res VoteResul
 			rejected++
 		}
 	}
-
-	if granted >= r.quorum() {
-		res = VoteWon
-	} else if granted+missing >= r.quorum() {
-		res = VotePending
-	} else {
-		res = VoteLost
-	}
-
 	return
 }
 
@@ -792,24 +796,15 @@ func (r *Raft) quorum() int {
 	return len(r.Prs)/2 + 1
 }
 
-type VoteResult uint8
-
-const (
-	VotePending VoteResult = iota + 1
-	VoteLost
-	VoteWon
-)
-
 func (r *Raft) committedEntryInCurrentTerm() bool {
 	return r.RaftLog.zeroTermOnErrCompacted(r.RaftLog.Term(r.RaftLog.committed)) == r.Term
 }
 
 func (r *Raft) bcastAppend() {
 	for id := range r.Prs {
-		if id == r.id {
-			continue
+		if id != r.id {
+			r.sendAppend(id)
 		}
-		r.sendAppend(id)
 	}
 }
 

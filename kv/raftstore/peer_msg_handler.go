@@ -10,6 +10,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/snap"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
 	"github.com/pingcap-incubator/tinykv/log"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 	rspb "github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
@@ -59,7 +60,14 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	d.Send(d.ctx.trans, rd.Messages)
 
 	if len(rd.CommittedEntries) > 0 {
-
+		for _, ent := range rd.CommittedEntries {
+			switch ent.EntryType {
+			case eraftpb.EntryType_EntryNormal:
+				d.applyCmdReq(ent)
+			case eraftpb.EntryType_EntryConfChange:
+				//todo apply conf change
+			}
+		}
 	}
 
 	d.RaftGroup.Advance(rd)
@@ -127,6 +135,10 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 	return err
 }
 
+func (d *peerMsgHandler) getCallbackFromProposals() *message.Callback {
+	return nil
+}
+
 func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	err := d.preProposeRaftCommand(msg)
 	if err != nil {
@@ -134,26 +146,21 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	// Your Code Here (2B).
-	if msg.AdminRequest != nil {
-		switch msg.AdminRequest.CmdType {
-		case raft_cmdpb.AdminCmdType_ChangePeer:
-		case raft_cmdpb.AdminCmdType_CompactLog:
-		case raft_cmdpb.AdminCmdType_Split:
-		case raft_cmdpb.AdminCmdType_TransferLeader:
-		default:
+	// cache callback
+	d.proposals = append(d.proposals, &proposal{
+		cb:    cb,
+		index: d.RaftGroup.Raft.RaftLog.LastIndex() + 1,
+		term:  d.Term(),
+	})
 
-		}
+	data, err := msg.Marshal()
+	if err != nil {
+		cb.Done(ErrResp(err))
+		return
 	}
-
-	for _, req := range msg.Requests {
-		switch req.CmdType {
-		case raft_cmdpb.CmdType_Get:
-		case raft_cmdpb.CmdType_Put:
-		case raft_cmdpb.CmdType_Delete:
-		case raft_cmdpb.CmdType_Snap:
-		default:
-
-		}
+	if err = d.RaftGroup.Propose(data); err != nil {
+		cb.Done(ErrResp(err))
+		return
 	}
 }
 
