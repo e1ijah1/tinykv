@@ -9,8 +9,8 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/runner"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/snap"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
+	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/log"
-	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 	rspb "github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
@@ -60,14 +60,13 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	d.Send(d.ctx.trans, rd.Messages)
 
 	if len(rd.CommittedEntries) > 0 {
+		kvWb := new(engine_util.WriteBatch)
 		for _, ent := range rd.CommittedEntries {
-			switch ent.EntryType {
-			case eraftpb.EntryType_EntryNormal:
-				d.applyCmdReq(ent)
-			case eraftpb.EntryType_EntryConfChange:
-				//todo apply conf change
-			}
+			d.applyCommittedEntry(ent, kvWb)
 		}
+		// apply changes to db
+		lastCommittedEnt := rd.CommittedEntries[len(rd.CommittedEntries)-1]
+		d.applyChangesToBadger(kvWb, lastCommittedEnt.Index)
 	}
 
 	d.RaftGroup.Advance(rd)
@@ -135,7 +134,31 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 	return err
 }
 
-func (d *peerMsgHandler) getCallbackFromProposals() *message.Callback {
+func (d *peerMsgHandler) appendProposal(cb *message.Callback) {
+	d.proposals = append(d.proposals, &proposal{
+		cb: cb,
+		// identify proposal by index + item
+		// index of log which contains this msg is next to current last index
+		index: d.RaftGroup.Raft.RaftLog.LastIndex() + 1,
+		// term of log which contains this msg is term of current raft group
+		term: d.Term(),
+	})
+}
+
+func (d *peerMsgHandler) getCallbackFromProposals(index, term uint64) *message.Callback {
+	if len(d.proposals) < 1 {
+		return nil
+	}
+	for _, prop := range d.proposals {
+		if prop.index == index && prop.term == term {
+			return prop.cb
+		}
+		if prop.index == index && prop.term != term {
+			log.Debugf("[region %d] find proposal by i:%d, t:%d, but got conflict prop %+v",
+				d.regionId, index, term, prop)
+			//todo handle conflict proposal
+		}
+	}
 	return nil
 }
 
@@ -146,18 +169,16 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	// Your Code Here (2B).
-	// cache callback
-	d.proposals = append(d.proposals, &proposal{
-		cb:    cb,
-		index: d.RaftGroup.Raft.RaftLog.LastIndex() + 1,
-		term:  d.Term(),
-	})
-
 	data, err := msg.Marshal()
 	if err != nil {
 		cb.Done(ErrResp(err))
 		return
 	}
+
+	d.appendProposal(cb)
+	prop := d.proposals[len(d.proposals)-1]
+	log.Debugf("[region %d] ld:%d term:%d add cb to proposal at i:%d,t:%d for msg %+v",
+		d.regionId, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, prop.index, prop.term, msg)
 	if err = d.RaftGroup.Propose(data); err != nil {
 		cb.Done(ErrResp(err))
 		return

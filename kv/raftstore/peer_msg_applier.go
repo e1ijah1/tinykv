@@ -1,8 +1,8 @@
 package raftstore
 
 import (
-	"github.com/Connor1996/badger"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/message"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/log"
@@ -10,8 +10,30 @@ import (
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 )
 
-func (d *peerMsgHandler) applyCmdReq(entry eraftpb.Entry) {
-	if d.stopped {
+func (d *peerMsgHandler) applyChangesToBadger(kvWb *engine_util.WriteBatch, index uint64) *engine_util.WriteBatch {
+	d.persistApplyState(kvWb, index)
+	d.writeChangesToKVDB(kvWb)
+	kvWb.Reset()
+	return kvWb
+}
+
+func (d *peerMsgHandler) persistApplyState(kvWb *engine_util.WriteBatch, index uint64) {
+	d.peerStorage.applyState.AppliedIndex = index
+	err := kvWb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+	if err != nil {
+		log.Errorf("[region %d] persist apply state to %d failed, err %v",
+			d.regionId, index, err)
+	}
+}
+
+func (d *peerMsgHandler) writeChangesToKVDB(kvWb *engine_util.WriteBatch) {
+	if err := kvWb.WriteToDB(d.peerStorage.Engines.Kv); err != nil {
+		log.Errorf("[region %d] write changes to kvdb failed, err %v", d.regionId, err)
+	}
+}
+
+func (d *peerMsgHandler) applyCommittedEntry(entry eraftpb.Entry, kvWb *engine_util.WriteBatch) {
+	if d.stopped || entry.Data == nil {
 		return
 	}
 	var msg raft_cmdpb.RaftCmdRequest
@@ -21,11 +43,18 @@ func (d *peerMsgHandler) applyCmdReq(entry eraftpb.Entry) {
 		log.Debugf("[region %d] apply raft entry failed, err when unmarshal entry data %v", d.regionId, err)
 		return
 	}
+	if msg.Header.RegionEpoch.Version != d.Region().RegionEpoch.Version {
+		cb := d.getCallbackFromProposals(entry.Index, entry.Term)
+		cb.Done(ErrResp(&util.ErrEpochNotMatch{}))
+		return
+	}
+	log.Debugf("[region %d] ld:%d term:%d find cb i:%d,t:%d for msg %+v",
+		d.regionId, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, entry.Index, entry.Term, msg)
 	// can't enclose normal requests and administrator request at same time.
 	if msg.AdminRequest != nil {
 		d.applyAdminCmd(msg.AdminRequest)
 	} else if len(msg.Requests) > 0 {
-		d.applyMultiDataCmd(msg.Requests)
+		d.applyMultiDataCmd(kvWb, msg.Requests, entry.Index, entry.Term)
 	}
 	return
 }
@@ -34,12 +63,17 @@ func (d *peerMsgHandler) applyAdminCmd(req *raft_cmdpb.AdminRequest) {
 	// todo apply admin cmd
 }
 
-func (d *peerMsgHandler) applyMultiDataCmd(requests []*raft_cmdpb.Request) {
-	cb := d.getCallbackFromProposals()
-	txn := d.newKvTxn(requests)
+func (d *peerMsgHandler) applyMultiDataCmd(kvWb *engine_util.WriteBatch, requests []*raft_cmdpb.Request, entryIndex, entryTerm uint64) {
+	cb := d.getCallbackFromProposals(entryIndex, entryTerm)
+	if cb == nil {
+		log.Debugf("[region %d] ld:%d term:%d cannot find cb for i:%d",
+			d.regionId, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, entryIndex, entryTerm)
+		return
+	}
+
 	resps := make([]*raft_cmdpb.Response, 0, len(requests))
 	for _, req := range requests {
-		resp, ok := d.applyDataCmd(txn, req, cb)
+		resp, ok := d.applyDataCmd(kvWb, entryIndex, req, cb)
 		if !ok {
 			return
 		}
@@ -51,83 +85,61 @@ func (d *peerMsgHandler) applyMultiDataCmd(requests []*raft_cmdpb.Request) {
 	return
 }
 
-func (d *peerMsgHandler) newKvTxn(reqs []*raft_cmdpb.Request) *badger.Txn {
-	needUpdate := false
-	for _, req := range reqs {
-		if (req.CmdType == raft_cmdpb.CmdType_Put && req.Put != nil) ||
-			(req.CmdType == raft_cmdpb.CmdType_Delete && req.Delete != nil) {
-			needUpdate = true
-			break
+func (d *peerMsgHandler) applyDataCmd(kvWb *engine_util.WriteBatch, entryIndex uint64, req *raft_cmdpb.Request, cb *message.Callback) (*raft_cmdpb.Response, bool) {
+	var key []byte
+
+	switch req.CmdType {
+	case raft_cmdpb.CmdType_Get:
+		key = req.Get.Key
+	case raft_cmdpb.CmdType_Put:
+		key = req.Put.Key
+	case raft_cmdpb.CmdType_Delete:
+		key = req.Delete.Key
+	}
+	if key != nil {
+		if err := util.CheckKeyInRegion(key, d.Region()); err != nil {
+			cb.Done(ErrResp(err))
+			return nil, false
 		}
 	}
-	txn := d.ctx.engine.Kv.NewTransaction(needUpdate)
-	return txn
-}
 
-func (d *peerMsgHandler) applyDataCmd(txn *badger.Txn, req *raft_cmdpb.Request, cb *message.Callback) (*raft_cmdpb.Response, bool) {
 	resp := &raft_cmdpb.Response{}
 	switch req.CmdType {
 	case raft_cmdpb.CmdType_Get:
 		{
-			if err := util.CheckKeyInRegion(req.Get.Key, d.Region()); err != nil {
-				cb.Done(ErrResp(err))
-				return nil, false
-			}
-			item, err := txn.Get(engine_util.KeyWithCF(req.Get.Cf, req.Get.Key))
+			// apply write changes before read, update applied index to current index
+			d.applyChangesToBadger(kvWb, entryIndex)
+			val, err := engine_util.GetCF(d.peerStorage.Engines.Kv, req.Get.Cf, req.Get.Key)
 			if err != nil {
 				cb.Done(ErrResp(err))
 				return nil, false
 			}
-			val, err := item.ValueCopy(nil)
-			if err != nil {
-				cb.Done(ErrResp(err))
-				return nil, false
-			}
+
 			resp.CmdType = raft_cmdpb.CmdType_Get
 			resp.Get = &raft_cmdpb.GetResponse{Value: val}
 		}
 	case raft_cmdpb.CmdType_Snap:
 		{
-			cb.Txn=txn
+			d.applyChangesToBadger(kvWb, entryIndex)
+			cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
 			resp.CmdType = raft_cmdpb.CmdType_Snap
-			resp.Snap= &raft_cmdpb.SnapResponse{
+			resp.Snap = &raft_cmdpb.SnapResponse{
 				Region: d.Region(),
 			}
 		}
 	case raft_cmdpb.CmdType_Put:
 		{
-			if err := util.CheckKeyInRegion(req.Put.Key, d.Region()); err != nil {
-				cb.Done(ErrResp(err))
-				return nil, false
-			}
-			err := txn.Set(engine_util.KeyWithCF(req.Put.Cf, req.Put.Key), req.Put.Value)
-			if err != nil {
-				if err == badger.ErrTxnTooBig {
-					_ = txn.Commit()
-					txn = d.ctx.engine.Kv.NewTransaction(true)
-					_ = txn.Set(engine_util.KeyWithCF(req.Put.Cf, req.Put.Key), req.Put.Value)
-				} else {
-					cb.Done(ErrResp(err))
-					return nil, false
-				}
-			}
+			kvWb.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
 			resp.CmdType = raft_cmdpb.CmdType_Put
 			resp.Put = &raft_cmdpb.PutResponse{}
 		}
 	case raft_cmdpb.CmdType_Delete:
 		{
-			if err := util.CheckKeyInRegion(req.Delete.Key, d.Region()); err != nil {
-				cb.Done(ErrResp(err))
-				return nil, false
-			}
-			err := txn.Delete(engine_util.KeyWithCF(req.Delete.Cf, req.Delete.Key))
-			if err != nil {
-				cb.Done(ErrResp(err))
-				return nil, false
-			}
+			kvWb.DeleteCF(req.Delete.Cf, req.Delete.Key)
 			resp.CmdType = raft_cmdpb.CmdType_Delete
 			resp.Delete = &raft_cmdpb.DeleteResponse{}
 		}
 	}
+	// cb done outside
 	return resp, true
 }

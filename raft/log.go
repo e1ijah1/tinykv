@@ -123,15 +123,13 @@ func (l *RaftLog) hasNextEnts() bool {
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() []pb.Entry {
 	// Your Code Here (2A).
-	offset := max(l.applied+1, l.firstIndex())
-	if l.committed+1 > offset {
-		ents, err := l.slice(offset, l.committed+1)
-		if err != nil {
-			log.Panicf("unexpected error when slice entries %v", err)
+	ents := make([]pb.Entry, 0, l.committed-l.applied)
+	for _, ent := range l.entries {
+		if ent.Index > l.applied && ent.Index <= l.committed {
+			ents = append(ents, ent)
 		}
-		return ents
 	}
-	return nil
+	return ents
 }
 
 func (l *RaftLog) appliedTo(i uint64) {
@@ -255,24 +253,17 @@ func (l *RaftLog) unstableTerm(i uint64) (uint64, bool) {
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	dummyIdx := l.firstIndex() - 1
-	if i < dummyIdx || i > l.LastIndex() {
-		return 0, nil
+	if !IsEmptySnap(l.pendingSnapshot) {
+		if i == l.pendingSnapshot.Metadata.Index {
+			return l.pendingSnapshot.Metadata.Term, nil
+		}
 	}
-
-	if t, ok := l.unstableTerm(i); ok {
-		return t, nil
+	for _, ent := range l.entries {
+		if ent.Index == i {
+			return ent.Term, nil
+		}
 	}
-
-	t, err := l.storage.Term(i)
-	if err == nil {
-		return t, nil
-	}
-	if err == ErrCompacted || err == ErrUnavailable {
-		return 0, err
-	}
-	log.Panicf("get term from storage error: %v", err)
-	return 0, nil
+	return l.storage.Term(i)
 }
 
 func (l *RaftLog) isUpToDate(lastIdx, term uint64) bool {
