@@ -266,10 +266,6 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 	return l.storage.Term(i)
 }
 
-func (l *RaftLog) isUpToDate(lastIdx, term uint64) bool {
-	return term > l.LastTerm() || (term == l.LastTerm() && lastIdx >= l.LastIndex())
-}
-
 func (l *RaftLog) appendEntriesWithTerm(ents []*pb.Entry, term uint64, pendingConfIndex *uint64) {
 	for _, ent := range ents {
 		if ent.EntryType == pb.EntryType_EntryConfChange {

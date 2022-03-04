@@ -146,3 +146,7 @@ func (r *lockedRand) Intn(n int) int {
 var globalRand = &lockedRand{
 	rand: rand.New(rand.NewSource(time.Now().UnixNano())),
 }
+
+func currentMs() int64 {
+	return time.Now().UnixNano() / int64(time.Millisecond)
+}
