@@ -207,14 +207,14 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 				if (rand.Int() % 1000) < 500 {
 					key := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
 					value := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
-					log.Infof("%d: client new put %v,%v\n", cli, key, value)
+					// log.Infof("%d: client new put %v,%v\n", cli, key, value)
 					cluster.MustPut([]byte(key), []byte(value))
 					last = NextValue(last, value)
 					j++
 				} else {
 					start := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", 0)
 					end := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
-					log.Infof("%d: client new scan %v-%v\n", cli, start, end)
+					// log.Infof("%d: client new scan %v-%v\n", cli, start, end)
 					values := cluster.Scan([]byte(start), []byte(end))
 					v := string(bytes.Join(values, []byte("")))
 					if v != last {
@@ -272,9 +272,9 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			// log.Printf("read from clients %d\n", cli)
 			j := <-clnts[cli]
 
-			// if j < 10 {
-			// 	log.Printf("Warning: client %d managed to perform only %d put operations in 1 sec?\n", i, j)
-			// }
+			if j < 10 {
+				log.Warnf("Warning: client %d managed to perform only %d put operations in 1 sec?\n", i, j)
+			}
 			start := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", 0)
 			end := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
 			values := cluster.Scan([]byte(start), []byte(end))
@@ -334,6 +334,7 @@ func TestBasic2B(t *testing.T) {
 	GenericTest(t, "2B", 1, false, false, false, -1, false, false)
 }
 
+// todo optimize performance of consensus layer
 func TestConcurrent2B(t *testing.T) {
 	// Test: many clients (2B) ...
 	GenericTest(t, "2B", 5, false, false, false, -1, false, false)
@@ -375,6 +376,12 @@ func TestOnePartition2B(t *testing.T) {
 	})
 	cluster.MustPut([]byte("k1"), []byte("v1"))
 	cluster.MustGet([]byte("k1"), []byte("v1"))
+	// nodes in partition 1 must write key to local db
+	MustGetEqual(cluster.engines[s1[0]], []byte("k1"), []byte("v1"))
+	MustGetEqual(cluster.engines[s1[1]], []byte("k1"), []byte("v1"))
+	MustGetEqual(cluster.engines[s1[2]], []byte("k1"), []byte("v1"))
+
+	// nodes in partition 2 unable get logs from leader
 	MustGetNone(cluster.engines[s2[0]], []byte("k1"))
 	MustGetNone(cluster.engines[s2[1]], []byte("k1"))
 	cluster.ClearFilters()
@@ -386,6 +393,8 @@ func TestOnePartition2B(t *testing.T) {
 		s1: s1,
 		s2: s2,
 	})
+	//fixme new leader doesn't have kv data of old leader
+	log.Infof("waiting for elect new leader, s1: %+v, s2: %+v", s1, s2)
 	cluster.MustGet([]byte("k1"), []byte("v1"))
 	cluster.MustPut([]byte("k1"), []byte("changed"))
 	MustGetEqual(cluster.engines[s1[0]], []byte("k1"), []byte("v1"))

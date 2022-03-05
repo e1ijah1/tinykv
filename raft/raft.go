@@ -245,6 +245,14 @@ func newRaft(c *Config) *Raft {
 	return r
 }
 
+func (r *Raft) ID() uint64 {
+	return r.id
+}
+
+func (r *Raft) IsLeader() bool {
+	return r.State == StateLeader
+}
+
 func (r *Raft) softState() *SoftState {
 	return &SoftState{
 		Lead:      r.Lead,

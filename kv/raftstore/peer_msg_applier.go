@@ -48,8 +48,10 @@ func (d *peerMsgHandler) applyCommittedEntry(entry eraftpb.Entry, kvWb *engine_u
 		cb.Done(ErrResp(&util.ErrEpochNotMatch{}))
 		return
 	}
-	log.Debugf("[region %d] ld:%d term:%d find cb i:%d,t:%d for msg %+v",
-		d.regionId, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, entry.Index, entry.Term, msg)
+	log.Debugf("[region %d] ld:%d term:%d find cb i:%d,t:%d",
+		d.regionId, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, entry.Index, entry.Term)
+	log.Debugf("[region %d] node %d ld:%d term:%d apply raft cmd entry, i:%d,t:%d, msg:%+v",
+		d.regionId, d.RaftGroup.Raft.ID(), d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, entry.Index, entry.Term, msg)
 	// can't enclose normal requests and administrator request at same time.
 	if msg.AdminRequest != nil {
 		d.applyAdminCmd(msg.AdminRequest)
@@ -66,21 +68,29 @@ func (d *peerMsgHandler) applyAdminCmd(req *raft_cmdpb.AdminRequest) {
 func (d *peerMsgHandler) applyMultiDataCmd(kvWb *engine_util.WriteBatch, requests []*raft_cmdpb.Request, entryIndex, entryTerm uint64) {
 	cb := d.getCallbackFromProposals(entryIndex, entryTerm)
 	if cb == nil {
-		log.Debugf("[region %d] ld:%d term:%d cannot find cb for i:%d",
-			d.regionId, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, entryIndex, entryTerm)
-		return
+		if d.RaftGroup.Raft.IsLeader() {
+			log.Debugf("[region %d] node %d ld:%d term:%d cannot find cb for i:%d,t:%d",
+				d.regionId, d.RaftGroup.Raft.ID(), d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, entryIndex, entryTerm)
+			return
+		} else {
+			cb = message.NewCallback()
+		}
 	}
 
 	resps := make([]*raft_cmdpb.Response, 0, len(requests))
 	for _, req := range requests {
 		resp, ok := d.applyDataCmd(kvWb, entryIndex, req, cb)
 		if !ok {
+			log.Errorf("[region %d] node %d apply raft cmd i:%d,t:%d failed, err: %v, %+v",
+				d.regionId, d.RaftGroup.Raft.ID(), entryIndex, entryTerm, cb.Resp, req)
 			return
 		}
 		resps = append(resps, resp)
 	}
 	cbResp := newCmdResp()
 	cbResp.Responses = resps
+	log.Debugf("[region %d] node %d apply raft cmd success ld:%d term:%d, i:%d,t:%d, reqs:%+v",
+		d.regionId, d.RaftGroup.Raft.ID(), d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, entryIndex, entryTerm, requests)
 	cb.Done(cbResp)
 	return
 }

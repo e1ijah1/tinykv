@@ -73,6 +73,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
+	log.Infof("[region %d] ld:%d,%d handle msg %+v", d.regionId, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, msg)
 	switch msg.Type {
 	case message.MsgTypeRaftMessage:
 		raftMsg := msg.Data.(*rspb.RaftMessage)
@@ -146,9 +147,31 @@ func (d *peerMsgHandler) appendProposal(cb *message.Callback) {
 }
 
 func (d *peerMsgHandler) getCallbackFromProposals(index, term uint64) *message.Callback {
-	if len(d.proposals) < 1 {
-		return nil
-	}
+
+	// for len(d.proposals) > 0 {
+	// 	pr := d.proposals[0]
+	// 	if pr.index > index && pr.term > term {
+	// 		log.Errorf("The pr at index {%d} and term {%d} not match, find index{%d}, term{%d}", index, term, pr.index, pr.term)
+	// 		return nil
+	// 	}
+	// 	d.proposals = d.proposals[1:]
+	// 	currTerm := d.RaftGroup.Raft.Term
+	// 	if pr.index == index && pr.term == term {
+	// 		return pr.cb
+	// 	}
+	// 	if pr.index == index && pr.term != term {
+	// 		pr.cb.Done(ErrRespStaleCommand(currTerm))
+	// 		continue
+	// 	}
+	// 	if pr.index > index {
+	// 		continue
+	// 	}
+	// 	if pr.index < index {
+	// 		pr.cb.Done(ErrRespStaleCommand(currTerm))
+	// 		continue
+	// 	}
+	// }
+	// return nil
 	for _, prop := range d.proposals {
 		if prop.index == index && prop.term == term {
 			return prop.cb
@@ -177,8 +200,8 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 
 	d.appendProposal(cb)
 	prop := d.proposals[len(d.proposals)-1]
-	log.Debugf("[region %d] ld:%d term:%d add cb to proposal at i:%d,t:%d for msg %+v",
-		d.regionId, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, prop.index, prop.term, msg)
+	log.Debugf("[region %d] receive raft cmd %+v ld:%d term:%d add cb to proposal at i:%d,t:%d for msg",
+		d.regionId, msg, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, prop.index, prop.term)
 	if err = d.RaftGroup.Propose(data); err != nil {
 		cb.Done(ErrResp(err))
 		return

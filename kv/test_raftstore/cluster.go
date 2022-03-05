@@ -199,6 +199,7 @@ func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.D
 		}
 		return resp, txn
 	}
+	log.Debugf("req %+v timeout", reqs)
 	panic("request timeout")
 }
 
