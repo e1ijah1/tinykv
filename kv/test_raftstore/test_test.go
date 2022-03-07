@@ -393,7 +393,6 @@ func TestOnePartition2B(t *testing.T) {
 		s1: s1,
 		s2: s2,
 	})
-	//fixme new leader doesn't have kv data of old leader
 	log.Infof("waiting for elect new leader, s1: %+v, s2: %+v", s1, s2)
 	cluster.MustGet([]byte("k1"), []byte("v1"))
 	cluster.MustPut([]byte("k1"), []byte("changed"))

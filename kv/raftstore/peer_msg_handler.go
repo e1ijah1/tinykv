@@ -70,10 +70,12 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	}
 
 	d.RaftGroup.Advance(rd)
+
+	// todo async apply
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
-	log.Infof("[region %d] ld:%d,%d handle msg %+v", d.regionId, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, msg)
+	log.Debugf("[region %d] ld:%d,%d handle msg %+v", d.regionId, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, msg)
 	switch msg.Type {
 	case message.MsgTypeRaftMessage:
 		raftMsg := msg.Data.(*rspb.RaftMessage)
@@ -147,42 +149,47 @@ func (d *peerMsgHandler) appendProposal(cb *message.Callback) {
 }
 
 func (d *peerMsgHandler) getCallbackFromProposals(index, term uint64) *message.Callback {
-
-	// for len(d.proposals) > 0 {
-	// 	pr := d.proposals[0]
-	// 	if pr.index > index && pr.term > term {
-	// 		log.Errorf("The pr at index {%d} and term {%d} not match, find index{%d}, term{%d}", index, term, pr.index, pr.term)
-	// 		return nil
-	// 	}
-	// 	d.proposals = d.proposals[1:]
-	// 	currTerm := d.RaftGroup.Raft.Term
-	// 	if pr.index == index && pr.term == term {
-	// 		return pr.cb
-	// 	}
-	// 	if pr.index == index && pr.term != term {
-	// 		pr.cb.Done(ErrRespStaleCommand(currTerm))
-	// 		continue
-	// 	}
-	// 	if pr.index > index {
-	// 		continue
-	// 	}
-	// 	if pr.index < index {
-	// 		pr.cb.Done(ErrRespStaleCommand(currTerm))
-	// 		continue
-	// 	}
-	// }
-	// return nil
-	for _, prop := range d.proposals {
-		if prop.index == index && prop.term == term {
-			return prop.cb
-		}
-		if prop.index == index && prop.term != term {
-			log.Debugf("[region %d] find proposal by i:%d, t:%d, but got conflict prop %+v",
-				d.regionId, index, term, prop)
-			//todo handle conflict proposal
-		}
+	if len(d.proposals) < 1 {
+		return nil
 	}
-	return nil
+	prop := d.proposals[0]
+
+	var cb *message.Callback
+	if prop.index == index && prop.term == term {
+		cb = prop.cb
+	}
+	if prop.index == index && prop.term != term {
+		log.Debugf("[region %d] find proposal by i:%d, t:%d, but got conflict prop %+v",
+			d.regionId, index, term, prop)
+		NotifyStaleReq(term, prop.cb)
+	}
+	d.proposals = d.proposals[1:]
+
+	return cb
+}
+
+func (d *peerMsgHandler) proposeDataCmd(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	data, err := msg.Marshal()
+	if err != nil {
+		cb.Done(ErrResp(err))
+		return
+	}
+	d.appendProposal(cb)
+
+	if err = d.RaftGroup.Propose(data); err != nil {
+		cb.Done(ErrResp(err))
+		return
+	}
+}
+
+func (d *peerMsgHandler) proposeAdminCmd(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	switch msg.AdminRequest.CmdType {
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		d.proposeDataCmd(msg, cb)
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+	case raft_cmdpb.AdminCmdType_TransferLeader:
+	case raft_cmdpb.AdminCmdType_Split:
+	}
 }
 
 func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
@@ -192,19 +199,11 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	// Your Code Here (2B).
-	data, err := msg.Marshal()
-	if err != nil {
-		cb.Done(ErrResp(err))
-		return
-	}
 
-	d.appendProposal(cb)
-	prop := d.proposals[len(d.proposals)-1]
-	log.Debugf("[region %d] receive raft cmd %+v ld:%d term:%d add cb to proposal at i:%d,t:%d for msg",
-		d.regionId, msg, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, prop.index, prop.term)
-	if err = d.RaftGroup.Propose(data); err != nil {
-		cb.Done(ErrResp(err))
-		return
+	if len(msg.Requests) > 0 {
+		d.proposeDataCmd(msg, cb)
+	} else if msg.AdminRequest != nil {
+		d.proposeAdminCmd(msg, cb)
 	}
 }
 

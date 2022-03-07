@@ -210,7 +210,7 @@ func newRaft(c *Config) *Raft {
 		votes:              make(map[uint64]bool),
 		Lead:               None,
 		RaftLog:            newLog(c.Storage),
-		leaderLeaseTimeout: int64(9 * c.ElectionTick),
+		leaderLeaseTimeout: int64(12 * c.ElectionTick),
 		leaderAliveTimeout: 3 * c.HeartbeatTick,
 	}
 	hs, cs, err := c.Storage.InitialState()
@@ -770,39 +770,6 @@ func (r *Raft) committedEntryInCurrentTerm() bool {
 	return r.RaftLog.zeroTermOnErrCompacted(r.RaftLog.Term(r.RaftLog.committed)) == r.Term
 }
 
-func (r *Raft) restore(snap *pb.Snapshot) bool {
-	if snap.Metadata.Index <= r.RaftLog.committed {
-		return false
-	}
-
-	if r.State != StateFollower {
-
-		r.becomeFollower(r.Term+1, None)
-		return false
-	}
-
-	found := false
-	for _, id := range snap.Metadata.ConfState.Nodes {
-		if id == r.id {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return false
-	}
-
-	if r.RaftLog.matchTerm(snap.Metadata.Index, snap.Metadata.Term) {
-		r.RaftLog.commitTo(snap.Metadata.Index)
-		return false
-	}
-	r.RaftLog.restore(snap)
-
-	pr := r.Prs[r.id]
-	pr.maybeUpdate(pr.Next - 1)
-	return true
-}
-
 func (r *Raft) advance(rd Ready) {
 	if newApplied := rd.appliedCursor(); newApplied > 0 {
 		r.RaftLog.appliedTo(newApplied)
@@ -1116,24 +1083,24 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
-	sindex, sterm := m.Snapshot.Metadata.Index, m.Snapshot.Metadata.Term
-	if r.restore(m.Snapshot) {
-		log.Debugf("%x [commit: %d] restored snapshot [index: %d, term: %d]",
-			r.id, r.RaftLog.committed, sindex, sterm)
-		r.send(pb.Message{
-			To:      m.From,
-			MsgType: pb.MessageType_MsgAppendResponse,
-			Index:   r.RaftLog.LastIndex(),
-		})
-	} else {
-		log.Debugf("%x [commit: %d] ignored snapshot [index: %d, term: %d]",
-			r.id, r.RaftLog.committed, sindex, sterm)
-		r.send(pb.Message{
-			To:      m.From,
-			MsgType: pb.MessageType_MsgAppendResponse,
-			Index:   r.RaftLog.committed,
-		})
+	lastIdx := m.Snapshot.Metadata.Index
+	if lastIdx <= r.RaftLog.committed {
+		r.sendAppendResp(m.From, r.RaftLog.LastIndex(), true)
+		return
 	}
+	r.becomeFollower(m.Term, m.From)
+
+	r.RaftLog.resetAllIndex(lastIdx)
+	r.RaftLog.pendingSnapshot = m.Snapshot
+	r.RaftLog.entries = []pb.Entry{}
+
+	// reset peers
+	r.Prs = make(map[uint64]*Progress)
+	for _, peer := range m.Snapshot.Metadata.ConfState.Nodes {
+		r.Prs[peer] = &Progress{}
+	}
+
+	r.sendAppendResp(m.From, r.RaftLog.LastIndex(), false)
 }
 
 func (r *Raft) handleTransferLeader(m pb.Message) {

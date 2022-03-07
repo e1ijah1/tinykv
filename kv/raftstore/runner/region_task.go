@@ -188,6 +188,7 @@ func doSnapshot(engines *engine_util.Engines, mgr *snap.SnapManager, regionId ui
 	confState := util.ConfStateFromRegion(region)
 	snapshot := &eraftpb.Snapshot{
 		Metadata: &eraftpb.SnapshotMetadata{
+			// truncatedIndex
 			Index:     key.Index,
 			Term:      key.Term,
 			ConfState: &confState,

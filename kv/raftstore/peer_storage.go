@@ -362,7 +362,50 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 	// and ps.clearExtraData to delete stale data
 	// Your Code Here (2C).
-	return nil, nil
+
+	// delete stale data
+	if ps.isInitialized() {
+		if err := ps.clearMeta(kvWB, raftWB); err != nil {
+			return nil, err
+		}
+		ps.clearExtraData(snapData.Region)
+	}
+
+	// update raftState
+	ps.raftState.LastIndex = snapshot.Metadata.Index
+	ps.raftState.LastTerm = snapshot.Metadata.Term
+
+	// update applyState
+	ps.applyState.AppliedIndex = snapshot.Metadata.Index
+	ps.applyState.TruncatedState.Index = snapshot.Metadata.Index
+	ps.applyState.TruncatedState.Term = snapshot.Metadata.Term
+
+	_ = kvWB.SetMeta(meta.ApplyStateKey(ps.region.Id), ps.applyState)
+
+	// send task to region worker
+	done := make(chan bool, 1)
+	applyTask := &runner.RegionTaskApply{
+		RegionId: snapData.Region.Id,
+		Notifier: done,
+		SnapMeta: snapshot.Metadata,
+		StartKey: snapData.Region.StartKey,
+		EndKey: snapData.Region.EndKey,
+	}
+	ps.regionSched<-applyTask
+
+	<-done
+	ps.snapState.StateType = snap.SnapState_Applying
+
+	_ = kvWB.SetMeta(meta.RegionStateKey(snapData.Region.Id), &rspb.RegionLocalState{
+		State: rspb.PeerState_Normal,
+		Region: snapData.Region,
+	})
+
+
+	return &ApplySnapResult{
+		Region: snapData.Region,
+		PrevRegion: ps.region,
+	}, nil
 }
 
 // Save memory states to disk.

@@ -43,7 +43,7 @@ func (d *peerMsgHandler) applyCommittedEntry(entry eraftpb.Entry, kvWb *engine_u
 		log.Debugf("[region %d] apply raft entry failed, err when unmarshal entry data %v", d.regionId, err)
 		return
 	}
-	if msg.Header.RegionEpoch.Version != d.Region().RegionEpoch.Version {
+	if msg.Header.RegionEpoch != nil && msg.Header.RegionEpoch.Version != d.Region().RegionEpoch.Version {
 		cb := d.getCallbackFromProposals(entry.Index, entry.Term)
 		cb.Done(ErrResp(&util.ErrEpochNotMatch{}))
 		return
@@ -54,15 +54,11 @@ func (d *peerMsgHandler) applyCommittedEntry(entry eraftpb.Entry, kvWb *engine_u
 		d.regionId, d.RaftGroup.Raft.ID(), d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, entry.Index, entry.Term, msg)
 	// can't enclose normal requests and administrator request at same time.
 	if msg.AdminRequest != nil {
-		d.applyAdminCmd(msg.AdminRequest)
+		d.applyAdminCmd(kvWb, msg.AdminRequest)
 	} else if len(msg.Requests) > 0 {
 		d.applyMultiDataCmd(kvWb, msg.Requests, entry.Index, entry.Term)
 	}
 	return
-}
-
-func (d *peerMsgHandler) applyAdminCmd(req *raft_cmdpb.AdminRequest) {
-	// todo apply admin cmd
 }
 
 func (d *peerMsgHandler) applyMultiDataCmd(kvWb *engine_util.WriteBatch, requests []*raft_cmdpb.Request, entryIndex, entryTerm uint64) {
@@ -73,6 +69,7 @@ func (d *peerMsgHandler) applyMultiDataCmd(kvWb *engine_util.WriteBatch, request
 				d.regionId, d.RaftGroup.Raft.ID(), d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Term, entryIndex, entryTerm)
 			return
 		} else {
+			// empty callback ensure follower can apply committed entries.
 			cb = message.NewCallback()
 		}
 	}
@@ -152,4 +149,22 @@ func (d *peerMsgHandler) applyDataCmd(kvWb *engine_util.WriteBatch, entryIndex u
 	}
 	// cb done outside
 	return resp, true
+}
+
+func (d *peerMsgHandler) applyAdminCmd(kvWb *engine_util.WriteBatch, req *raft_cmdpb.AdminRequest) {
+	// todo apply admin cmd
+	switch req.CmdType {
+		case raft_cmdpb.AdminCmdType_CompactLog:
+			d.applyCompactLog(kvWb, req.CompactLog)
+	}
+}
+
+func (d *peerMsgHandler) applyCompactLog(kvWb *engine_util.WriteBatch, req *raft_cmdpb.CompactLogRequest) {
+	if req.CompactIndex > d.peerStorage.applyState.TruncatedState.Index {
+		d.peerStorage.applyState.TruncatedState.Index=req.CompactIndex
+		d.peerStorage.applyState.TruncatedState.Term = req.CompactTerm
+
+		d.persistApplyState(kvWb, d.peerStorage.applyState.AppliedIndex)
+	}
+	d.ScheduleCompactLog(req.CompactIndex)
 }
