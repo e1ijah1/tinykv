@@ -2,6 +2,7 @@ package test_raftstore
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math/rand"
 	_ "net/http/pprof"
@@ -21,27 +22,27 @@ import (
 )
 
 // a client runs the function f and then signals it is done
-func runClient(t *testing.T, me int, ca chan bool, fn func(me int, t *testing.T)) {
+func runClient(me int, ca chan bool, fn func(me int)) {
 	ok := false
 	defer func() { ca <- ok }()
-	fn(me, t)
+	fn(me)
 	ok = true
 }
 
 // spawn ncli clients and wait until they are all done
-func SpawnClientsAndWait(t *testing.T, ch chan bool, ncli int, fn func(me int, t *testing.T)) {
+func SpawnClientsAndWait(errCh chan error, ch chan bool, ncli int, fn func(me int)) {
 	defer func() { ch <- true }()
 	ca := make([]chan bool, ncli)
 	for cli := 0; cli < ncli; cli++ {
 		ca[cli] = make(chan bool)
-		go runClient(t, cli, ca[cli], fn)
+		go runClient(cli, ca[cli], fn)
 	}
 	// log.Printf("SpawnClientsAndWait: waiting for clients")
 	for cli := 0; cli < ncli; cli++ {
 		ok := <-ca[cli]
 		// log.Infof("SpawnClientsAndWait: client %d is done\n", cli)
 		if ok == false {
-			t.Fatalf("failure")
+			errCh <- errors.New("failure")
 		}
 	}
 
@@ -55,6 +56,7 @@ func NextValue(prev string, val string) string {
 // check that for a specific client all known appends are present in a value,
 // and in order
 func checkClntAppends(t *testing.T, clnt int, v string, count int) {
+	t.Helper()
 	lastoff := -1
 	for j := 0; j < count; j++ {
 		wanted := "x " + strconv.Itoa(clnt) + " " + strconv.Itoa(j) + " y"
@@ -193,16 +195,18 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 	for i := 0; i < nclients; i++ {
 		clnts[i] = make(chan int, 1)
 	}
+	errCh := make(chan error, nclients)
 	for i := 0; i < 3; i++ {
 		// log.Printf("Iteration %v\n", i)
 		atomic.StoreInt32(&done_clients, 0)
 		atomic.StoreInt32(&done_partitioner, 0)
-		go SpawnClientsAndWait(t, ch_clients, nclients, func(cli int, t *testing.T) {
+		go SpawnClientsAndWait(errCh, ch_clients, nclients, func(cli int) {
 			j := 0
 			defer func() {
 				clnts[cli] <- j
 			}()
 			last := ""
+
 			for atomic.LoadInt32(&done_clients) == 0 {
 				if (rand.Int() % 1000) < 500 {
 					key := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
@@ -218,7 +222,24 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 					values := cluster.Scan([]byte(start), []byte(end))
 					v := string(bytes.Join(values, []byte("")))
 					if v != last {
-						log.Fatalf("get wrong value, client %v\nwant:%v\ngot: %v\n", cli, last, v)
+						vals := strings.Split(v, "x")
+						kk := 0
+						jj := j-1
+						for k := len(vals)-1; k > 0; k-- {
+							fmt.Sscanf(vals[k], " "+strconv.Itoa(cli)+" %d y", &kk)
+							if kk != jj {
+								//  verify missing key
+								wantVal := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(jj) + " y"
+								missingKey := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", jj)
+								missingVal := cluster.Get([]byte(missingKey))
+								log.Warning("cli %d try get missing key %d, got %v, want", cli, jj, string(missingVal))
+								cluster.MustGet([]byte(missingKey), []byte(wantVal))
+							}
+							jj--
+						}
+
+						// errCh <- errors.New(fmt.Sprintf("get wrong value, client %v scan %v-%v\nwant:%v\ngot: %v\n",
+						// 	cli, start, end, last, v))
 					}
 				}
 			}
@@ -251,7 +272,12 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		}
 
 		log.Infof("wait for clients\n")
-		<-ch_clients
+		select {
+		case err := <-errCh:
+			t.Fatal(err)
+		case <-ch_clients:
+			break
+		}
 
 		if crash {
 			log.Warnf("shutdown servers\n")
