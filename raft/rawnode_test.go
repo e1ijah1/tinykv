@@ -19,6 +19,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -101,9 +102,11 @@ func TestRawNodeProposeAddDuplicateNode3A(t *testing.T) {
 		}
 		rawNode.Advance(rd)
 	}
-
+	lastIdx, _ := s.LastIndex()
+	log.Infof("lastIndex: %d", lastIdx)
 	proposeConfChangeAndApply := func(cc pb.ConfChange) {
 		rawNode.ProposeConfChange(cc)
+		// fixme empty ready
 		rd = rawNode.Ready()
 		s.Append(rd.Entries)
 		for _, entry := range rd.CommittedEntries {
@@ -140,6 +143,7 @@ func TestRawNodeProposeAddDuplicateNode3A(t *testing.T) {
 	}
 
 	// the last three entries should be: ConfChange cc1, cc1, cc2
+	log.Infof("lastIndex: %d", lastIndex)
 	entries, err := s.Entries(lastIndex-2, lastIndex+1)
 	if err != nil {
 		t.Fatal(err)

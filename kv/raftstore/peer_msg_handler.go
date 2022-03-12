@@ -177,6 +177,8 @@ func (d *peerMsgHandler) proposeDataCmd(msg *raft_cmdpb.RaftCmdRequest, cb *mess
 	d.appendProposal(cb)
 
 	if err = d.RaftGroup.Propose(data); err != nil {
+		log.Errorf("[region %d] node %d propose data cmd error %v",
+			d.regionId, d.RaftGroup.Raft.ID(), err)
 		cb.Done(ErrResp(err))
 		return
 	}

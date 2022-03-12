@@ -437,6 +437,7 @@ func (r *Raft) advanceCommitForLeader() {
 	}
 	maxCommit := r.RaftLog.committed
 
+	// calc committed index
 	for i := r.RaftLog.committed + 1; i <= r.RaftLog.LastIndex(); i++ {
 		cnt := 0
 		for _, pr := range r.Prs {
@@ -456,22 +457,9 @@ func (r *Raft) advanceCommitForLeader() {
 	}
 }
 
-func (r *Raft) appendEntry(es ...*pb.Entry) bool {
-	li := r.RaftLog.LastIndex()
-	for i := range es {
-		es[i].Term = r.Term
-		es[i].Index = li + 1 + uint64(i)
-	}
-
-	li = r.RaftLog.append(es...)
-	r.Prs[r.id].maybeUpdate(li)
-	r.maybeCommit()
-	return true
-}
-
-func (r *Raft) maybeCommit() bool {
+func (r *Raft) maybeCommit() {
 	mci := r.committedIndex()
-	return r.RaftLog.maybeCommit(mci, r.Term)
+	r.RaftLog.maybeCommit(mci, r.Term)
 }
 
 // calc committed index for marjority node
@@ -505,16 +493,16 @@ func (r *Raft) Step(m pb.Message) error {
 		r.leadTransferee = None
 		r.becomeFollower(m.Term, None)
 	}
-	var err error
+
 	switch r.State {
 	case StateLeader:
-		err = r.stepLeader(m)
+		r.stepLeader(m)
 	case StateFollower:
-		err = r.stepFollower(m)
+		r.stepFollower(m)
 	case StateCandidate:
-		err = r.stepCandidate(m)
+		r.stepCandidate(m)
 	}
-	return err
+	return nil
 }
 
 func (r *Raft) updateLastVisit(peer uint64) {
@@ -525,17 +513,17 @@ func (r *Raft) checkFollowerActive(to uint64, curMs int64) bool {
 	return (curMs - r.Prs[to].lastVisitTime) < r.leaderLeaseTimeout
 }
 
-func (r *Raft) stepLeader(m pb.Message) error {
-	pr := r.Prs[m.From]
-	if pr == nil {
-		log.Errorf("node %d not found in prs", m.From)
-		return nil
-	}
+func (r *Raft) stepLeader(m pb.Message) {
 	switch m.MsgType {
 	case pb.MessageType_MsgBeat:
 		r.bcastHeartbeat()
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.updateLastVisit(m.From)
+		pr := r.Prs[m.From]
+		if pr == nil {
+			log.Errorf("node %d not found in prs", m.From)
+			return
+		}
 		if pr.Match < r.RaftLog.LastIndex() {
 			r.sendAppend(m.From)
 		}
@@ -552,10 +540,10 @@ func (r *Raft) stepLeader(m pb.Message) error {
 	case pb.MessageType_MsgPropose:
 		r.handlePropose(m)
 	}
-	return nil
+	return
 }
 
-func (r *Raft) stepCandidate(m pb.Message) error {
+func (r *Raft) stepCandidate(m pb.Message) {
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
 		r.campaign()
@@ -575,10 +563,10 @@ func (r *Raft) stepCandidate(m pb.Message) error {
 	case pb.MessageType_MsgTimeoutNow:
 		r.handleTimeoutNow(m)
 	}
-	return nil
+	return
 }
 
-func (r *Raft) stepFollower(m pb.Message) error {
+func (r *Raft) stepFollower(m pb.Message) {
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
 		r.campaign()
@@ -598,145 +586,32 @@ func (r *Raft) stepFollower(m pb.Message) error {
 			r.send(m)
 		}
 	}
-	return nil
+	return
 }
 
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	if _, ok := r.Prs[id]; !ok {
+		r.Prs[id] = &Progress{
+			Match: 0,
+			Next:  1,
+		}
+	}
+	r.PendingConfIndex = None
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
-}
-
-func stepLeader(r *Raft, m pb.Message) error {
-	switch m.MsgType {
-	case pb.MessageType_MsgBeat:
-		r.bcastHeartbeat()
-		return nil
-	case pb.MessageType_MsgPropose:
-		if r.leadTransferee != None {
-			log.Debugf("node %d [term %d] transfer leadership to %d is in progress; dropping proposal", r.id, r.Term, r.leadTransferee)
-			return ErrProposalDropped
+	if _, ok := r.Prs[id]; ok {
+		delete(r.Prs, id)
+		if r.IsLeader() {
+			r.advanceCommitForLeader()
 		}
-		if len(m.Entries) < 1 {
-			log.Panicf("node %d stepped empty MsgProp", r.id)
-		}
-		r.RaftLog.appendEntriesWithTerm(m.Entries, r.Term, &r.PendingConfIndex)
-
-		r.bcastAppend()
-
-		li := r.RaftLog.LastIndex()
-		r.Prs[r.id].Match = li
-		r.Prs[r.id].Next = li + 1
-		return nil
 	}
 
-	pr := r.Prs[m.From]
-	if pr == nil {
-		log.Debugf("node %d no pr available for %d", r.id, m.From)
-		return nil
-	}
-
-	switch m.MsgType {
-	case pb.MessageType_MsgAppendResponse:
-		// if reject then retry
-		if m.Reject {
-			nextProbeIdx := m.Index
-			if m.LogTerm > 0 {
-				nextProbeIdx = r.RaftLog.findConflictByTerm(m.Index, m.LogTerm)
-			}
-			pr.Next = max(nextProbeIdx, 1)
-			r.sendAppend(m.From)
-
-		} else {
-			if pr.maybeUpdate(m.Index) {
-				// update commit after majroity nodes received log
-				if r.maybeCommit() {
-					r.bcastAppend()
-				}
-
-				if r.maybeSendAppend(m.From, false) {
-				}
-
-				if m.From == r.leadTransferee && pr.Match == r.RaftLog.LastIndex() {
-					r.sendTimeoutNow(m.From)
-				}
-			}
-		}
-	case pb.MessageType_MsgHeartbeatResponse:
-		if pr.Match < r.RaftLog.LastIndex() {
-			r.sendAppend(m.From)
-		}
-	case pb.MessageType_MsgSnapshot:
-		//todo
-	case pb.MessageType_MsgTransferLeader:
-
-	}
-	return nil
-}
-
-func stepCandidate(r *Raft, m pb.Message) error {
-	switch m.MsgType {
-	case pb.MessageType_MsgAppend:
-		r.becomeFollower(m.Term, m.From)
-		r.handleAppendEntries(m)
-	case pb.MessageType_MsgHeartbeat:
-		r.becomeFollower(m.Term, m.From)
-		r.handleHeartbeat(m)
-	case pb.MessageType_MsgSnapshot:
-		r.becomeFollower(m.Term, m.From)
-		r.handleSnapshot(m)
-	case pb.MessageType_MsgRequestVoteResponse:
-		gr, rj := r.poll(m.From, !m.Reject)
-
-		if gr >= r.quorum() {
-			r.becomeLeader()
-		} else if rj >= r.quorum() {
-			r.becomeFollower(r.Term, None)
-		}
-
-	default:
-		log.Debugf("node %d stepCandidate ignore msg %s", r.id, m.MsgType)
-	}
-	return nil
-}
-
-func stepFollower(r *Raft, m pb.Message) error {
-	switch m.MsgType {
-	case pb.MessageType_MsgPropose:
-		if r.Lead == None {
-			log.Infof("node %d no leader at term %d, dropping proposal", r.id, r.Term)
-			return ErrProposalDropped
-		}
-		m.To = r.Lead
-		r.send(m)
-	case pb.MessageType_MsgAppend:
-		r.electionElapsed = 0
-		r.Lead = m.From
-		r.handleAppendEntries(m)
-	case pb.MessageType_MsgHeartbeat:
-		r.electionElapsed = 0
-		r.Lead = m.From
-		r.handleHeartbeat(m)
-	case pb.MessageType_MsgSnapshot:
-		r.electionElapsed = 0
-		r.Lead = m.From
-		r.handleSnapshot(m)
-	case pb.MessageType_MsgTransferLeader:
-		if r.Lead == None {
-			log.Infof("node %d no leader at term %d, dropping leader transfer msg", r.id, r.Term)
-			return nil
-		}
-		m.To = r.Lead
-		r.send(m)
-	case pb.MessageType_MsgTimeoutNow:
-		//todo
-	default:
-	}
-	return nil
+	r.PendingConfIndex = None
 }
 
 func (r *Raft) poll(id uint64, v bool) (granted int, rejected int) {
@@ -786,7 +661,7 @@ func (r *Raft) advance(rd Ready) {
 // -------- sending func -------
 // sendAppend sends an append RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
-func (r *Raft) sendAppend(to uint64) bool {
+func (r *Raft) sendAppend(to uint64) {
 	nextIdx := r.Prs[to].Next
 	preLogIndex := uint64(0)
 	if nextIdx > 0 {
@@ -796,7 +671,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 	preLogTerm, err := r.RaftLog.Term(preLogIndex)
 	if err != nil {
 		r.sendSnapshot(to)
-		return false
+		return
 	}
 
 	entries, _ := r.RaftLog.getEntries(nextIdx)
@@ -808,7 +683,6 @@ func (r *Raft) sendAppend(to uint64) bool {
 		LogTerm: preLogTerm,
 		Index:   preLogIndex,
 	})
-	return true
 }
 
 func (r *Raft) sendAppendResp(to, lastIdx uint64, reject bool) {
@@ -885,7 +759,7 @@ func (r *Raft) send(m pb.Message) {
 		m.From = r.id
 	}
 
-	if m.MsgType == pb.MessageType_MsgRequestVote || m.MsgType == pb.MessageType_MsgRequestVoteResponse || m.MsgType == pb.MessageType_MsgTransferLeader {
+	if m.MsgType == pb.MessageType_MsgRequestVote || m.MsgType == pb.MessageType_MsgRequestVoteResponse {
 		if m.Term == 0 {
 			log.Panicf("term should be set when sending %s", m.MsgType)
 		}
@@ -919,7 +793,7 @@ func (r *Raft) bcastAppend() {
 // --------- handle funcs --------
 func (r *Raft) handlePropose(m pb.Message) {
 	if r.leadTransferee != None {
-		log.Debugf("node %d [term %d] transfer leadership to %d is in progress; dropping proposal", r.id, r.Term, r.leadTransferee)
+		log.Errorf("node %d [term %d] transfer leadership to %d is in progress; dropping proposal", r.id, r.Term, r.leadTransferee)
 		return
 	}
 
