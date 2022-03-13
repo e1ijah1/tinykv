@@ -53,7 +53,7 @@ const FORMAT_TIME_HOUR string = "2006010215"
 var _log *Logger = New()
 
 func init() {
-	logFile, _ := os.OpenFile("log.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	logFile, _ := os.OpenFile("log.log", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0666)
 	mw := io.MultiWriter(os.Stdout, logFile)
 	_log = NewLogger(mw, "")
 	SetFlags(Ldate | Ltime | Lshortfile)

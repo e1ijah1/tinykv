@@ -53,6 +53,24 @@ func newStoreMeta() *storeMeta {
 	}
 }
 
+func (m *storeMeta) changeRegionPeer(region *metapb.Region, peer *metapb.Peer, addPeer bool) {
+	region.RegionEpoch.ConfVer++
+	if addPeer {
+		region.Peers = append(region.Peers, peer)
+	} else {
+		for i, p := range region.Peers {
+			if p.Id == peer.Id {
+				region.Peers = append(region.Peers[:i], region.Peers[i+1:]...)
+				break
+			}
+		}
+	}
+	m.Lock()
+	defer m.Unlock()
+	m.regions[region.Id] = region
+	m.regionRanges.ReplaceOrInsert(&regionItem{region: region})
+}
+
 func (m *storeMeta) setRegion(region *metapb.Region, peer *peer) {
 	m.regions[region.Id] = region
 	peer.SetRegion(region)

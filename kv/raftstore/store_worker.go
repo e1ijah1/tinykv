@@ -79,7 +79,7 @@ func (d *storeWorker) handleMsg(msg message.Msg) {
 	switch msg.Type {
 	case message.MsgTypeStoreRaftMessage:
 		if err := d.onRaftMessage(msg.Data.(*rspb.RaftMessage)); err != nil {
-			log.Errorf("handle raft message failed storeID %d, %v", d.id, err)
+			log.Errorf("handle raft message failed storeID %d, %v, curr region %+v", d.id, err, d.ctx.storeMeta.regions)
 		}
 	case message.MsgTypeStoreTick:
 		d.onTick(msg.Data.(StoreTick))
