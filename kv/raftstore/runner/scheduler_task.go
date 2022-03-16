@@ -86,6 +86,7 @@ func (r *SchedulerTaskHandler) onRegionHeartbeatResponse(resp *schedulerpb.Regio
 }
 
 func (r *SchedulerTaskHandler) onAskSplit(t *SchedulerAskSplitTask) {
+	// 向 PD 请求分配新的 ID，包含所有新 Region 的 ID 以及它所有的 Peer 的 ID
 	resp, err := r.SchedulerClient.AskSplit(context.TODO(), t.Region)
 	if err != nil {
 		log.Error(err)

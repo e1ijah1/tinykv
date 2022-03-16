@@ -205,3 +205,25 @@ func RegionEqual(l, r *metapb.Region) bool {
 	}
 	return l.Id == r.Id && l.RegionEpoch.Version == r.RegionEpoch.Version && l.RegionEpoch.ConfVer == r.RegionEpoch.ConfVer
 }
+
+func CopyRegion(region *metapb.Region, req *raft_cmdpb.SplitRequest) *metapb.Region {
+	newPeers := make([]*metapb.Peer, 0, len(region.Peers))
+
+	for i, p := range region.Peers {
+		newPeers = append(newPeers, &metapb.Peer{
+			Id:      req.NewPeerIds[i],
+			StoreId: p.StoreId,
+		})
+	}
+
+	return &metapb.Region{
+		Id:       req.NewRegionId,
+		StartKey: req.SplitKey,
+		EndKey:   region.EndKey,
+		RegionEpoch: &metapb.RegionEpoch{
+			ConfVer: region.RegionEpoch.ConfVer,
+			Version: region.RegionEpoch.Version,
+		},
+		Peers: newPeers,
+	}
+}

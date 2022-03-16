@@ -213,7 +213,6 @@ func (d *peerMsgHandler) proposeAdminCmd(msg *raft_cmdpb.RaftCmdRequest, cb *mes
 			log.Errorf("[region %d] node %d propose conf change error %v",
 				d.regionId, d.RaftGroup.Raft.ID(), err)
 		}
-
 	case raft_cmdpb.AdminCmdType_TransferLeader:
 		peer := msg.AdminRequest.TransferLeader.Peer
 
@@ -225,7 +224,12 @@ func (d *peerMsgHandler) proposeAdminCmd(msg *raft_cmdpb.RaftCmdRequest, cb *mes
 		}
 		cb.Done(cbResp)
 	case raft_cmdpb.AdminCmdType_Split:
-
+		key := msg.AdminRequest.Split.SplitKey
+		if err := util.CheckKeyInRegion(key, d.Region()); err != nil {
+			cb.Done(ErrResp(&util.ErrKeyNotInRegion{}))
+			return
+		}
+		d.proposeCmd(msg, cb)
 	}
 }
 
@@ -565,6 +569,13 @@ func (d *peerMsgHandler) onRaftGCLogTick() {
 	d.proposeRaftCommand(request, nil)
 }
 
+/*
+以下几个情况不触发检查
+- 有检查任务正在进行；
+- 数据增量小于阈值；
+- 当前正在生成 snapshot 中并且触发次数小于定值。
+如果频繁 Split，会导致生成的 snapshot 可能因为 version与当前不一致被丢弃，但是也不能一直不 Split，故设置了触发上限。
+*/
 func (d *peerMsgHandler) onSplitRegionCheckTick() {
 	d.ticker.schedule(PeerTickSplitRegionCheck)
 	// To avoid frequent scan, we only add new scan tasks if all previous tasks

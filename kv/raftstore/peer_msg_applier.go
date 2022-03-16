@@ -1,12 +1,14 @@
 package raftstore
 
 import (
+	"github.com/golang/protobuf/proto"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/message"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
 )
@@ -69,6 +71,9 @@ func (d *peerMsgHandler) applyCommittedEntry(entry eraftpb.Entry, kvWb *engine_u
 		return
 	}
 
+	// 非 Admin Request， Proposal 中的 version 与当前的不相等。
+	// Split，Merge 的 Request，Proposal 中的 Region epoch 与当前的不相等。
+	// check region version
 	if msg.Header.RegionEpoch != nil && msg.Header.RegionEpoch.Version != d.Region().RegionEpoch.Version {
 		cb.Done(ErrResp(&util.ErrEpochNotMatch{}))
 		return
@@ -76,7 +81,7 @@ func (d *peerMsgHandler) applyCommittedEntry(entry eraftpb.Entry, kvWb *engine_u
 
 	// can't enclose normal requests and administrator request at same time.
 	if msg.AdminRequest != nil {
-		d.applyAdminCmd(kvWb, msg, entry, cb)
+		d.applyAdminCmd(kvWb, msg, cb)
 	} else if len(msg.Requests) > 0 {
 		d.applyMultiDataCmd(kvWb, msg.Requests, entry, cb)
 	}
@@ -172,7 +177,7 @@ func (d *peerMsgHandler) applyDataCmd(kvWb *engine_util.WriteBatch, entryIndex u
 	return resp, true
 }
 
-func (d *peerMsgHandler) applyAdminCmd(kvWb *engine_util.WriteBatch, msg raft_cmdpb.RaftCmdRequest, entry eraftpb.Entry, cb *message.Callback) {
+func (d *peerMsgHandler) applyAdminCmd(kvWb *engine_util.WriteBatch, msg raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	req := msg.AdminRequest
 	if req.CmdType != raft_cmdpb.AdminCmdType_CompactLog {
 		if err := util.CheckRegionEpoch(&msg, d.Region(), true); err != nil {
@@ -182,13 +187,17 @@ func (d *peerMsgHandler) applyAdminCmd(kvWb *engine_util.WriteBatch, msg raft_cm
 			return
 		}
 	}
+	if err := util.CheckRegionEpoch(&msg, d.Region(), true); err != nil {
+		cb.Done(ErrResp(err))
+		return
+	}
 	switch req.CmdType {
 	case raft_cmdpb.AdminCmdType_CompactLog:
 		d.applyCompactLog(kvWb, req.CompactLog)
 	case raft_cmdpb.AdminCmdType_ChangePeer:
-		d.applyChangePeer(kvWb, req.ChangePeer, entry, cb)
+		d.applyChangePeer(kvWb, req.ChangePeer, cb)
 	case raft_cmdpb.AdminCmdType_Split:
-
+		d.applySplit(kvWb, req.Split, cb)
 	}
 }
 
@@ -202,8 +211,7 @@ func (d *peerMsgHandler) applyCompactLog(kvWb *engine_util.WriteBatch, req *raft
 	d.ScheduleCompactLog(req.CompactIndex)
 }
 
-func (d *peerMsgHandler) applyChangePeer(kvWb *engine_util.WriteBatch, req *raft_cmdpb.ChangePeerRequest, entry eraftpb.Entry, cb *message.Callback) {
-
+func (d *peerMsgHandler) applyChangePeer(kvWb *engine_util.WriteBatch, req *raft_cmdpb.ChangePeerRequest, cb *message.Callback) {
 	region := d.Region()
 	existed := false
 	for _, p := range region.Peers {
@@ -231,7 +239,9 @@ func (d *peerMsgHandler) applyChangePeer(kvWb *engine_util.WriteBatch, req *raft
 		d.ctx.storeMeta.changeRegionPeer(region, req.Peer, false)
 		d.removePeerCache(req.Peer.Id)
 	}
-
+	if d.IsLeader() {
+		d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
+	}
 	peerState := raft_serverpb.PeerState_Normal
 
 	// destory self to prevent removed node start election
@@ -252,4 +262,61 @@ func (d *peerMsgHandler) applyChangePeer(kvWb *engine_util.WriteBatch, req *raft
 	})
 	log.Infof("[region %d] node %d metaId %d applied conf change %+v",
 		d.regionId, d.RaftGroup.Raft.ID(), d.Meta.Id, req)
+}
+
+/*
+配置变更的时候， conf_ver+ 1。
+Split 的时候，原 region 与新 region 的 version均等于原 region 的 version+ 新 region 个数。
+Merge 的时候，两个 region 的 version均等于这两个 region 的 version最大值 + 1。
+*/
+func (d *peerMsgHandler) applySplit(kvWb *engine_util.WriteBatch, req *raft_cmdpb.SplitRequest, cb *message.Callback) {
+
+	region := d.Region()
+
+	if err := util.CheckKeyInRegion(req.SplitKey, region); err != nil {
+		cb.Done(ErrResp(err))
+		return
+	}
+
+	// split region
+	originRegion := proto.Clone(d.Region()).(*metapb.Region)
+	originRegion.RegionEpoch.Version++
+	newRegion := util.CopyRegion(originRegion, req)
+	originRegion.EndKey = req.SplitKey
+
+	// update global meta
+	d.ctx.storeMeta.split(d.Region(), originRegion, newRegion)
+	d.peerStorage.SetRegion(originRegion)
+
+	// create new peer
+	newPeer, err := createPeer(d.ctx.store.Id, d.ctx.cfg, d.ctx.regionTaskSender, d.ctx.engine, newRegion)
+	if err != nil {
+		cb.Done(ErrResp(err))
+		return
+	}
+	for _, p := range newRegion.Peers {
+		newPeer.insertPeerCache(p)
+	}
+	d.ctx.router.register(newPeer)
+	_ = d.ctx.router.send(newRegion.Id, message.Msg{Type: message.MsgTypeStart})
+
+	// write region state
+	meta.WriteRegionState(kvWb, originRegion, raft_serverpb.PeerState_Normal)
+	meta.WriteRegionState(kvWb, newRegion, raft_serverpb.PeerState_Normal)
+	d.SizeDiffHint = 0
+	d.ApproximateSize = new(uint64)
+
+	resp := newCmdResp()
+	resp.AdminResponse = &raft_cmdpb.AdminResponse{
+		CmdType: raft_cmdpb.AdminCmdType_Split,
+		Split: &raft_cmdpb.SplitResponse{
+			Regions: []*metapb.Region{originRegion, newRegion},
+		},
+	}
+	cb.Done(resp)
+
+	if d.IsLeader() {
+		d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
+	}
+	newPeer.HeartbeatScheduler(d.ctx.schedulerTaskSender)
 }

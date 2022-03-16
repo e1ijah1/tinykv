@@ -2,6 +2,7 @@ package test_raftstore
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -224,15 +225,16 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 					if v != last {
 						vals := strings.Split(v, "x")
 						kk := 0
-						jj := j-1
-						for k := len(vals)-1; k > 0; k-- {
+						jj := j - 1
+						for k := len(vals) - 1; k > 0; k-- {
 							fmt.Sscanf(vals[k], " "+strconv.Itoa(cli)+" %d y", &kk)
 							if kk != jj {
 								//  verify missing key
 								wantVal := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(jj) + " y"
 								missingKey := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", jj)
 								missingVal := cluster.Get([]byte(missingKey))
-								log.Warning("cli %d try get missing key %d, got %v, want", cli, jj, string(missingVal))
+								log.Warningf("cli %d try get missing key %d, got %s, want %s",
+									cli, jj, string(missingVal), wantVal)
 								cluster.MustGet([]byte(missingKey), []byte(wantVal))
 							}
 							jj--
@@ -659,6 +661,52 @@ func TestConfChangeSnapshotUnreliableRecover3B(t *testing.T) {
 func TestConfChangeSnapshotUnreliableRecoverConcurrentPartition3B(t *testing.T) {
 	// Test: unreliable net, restarts, partitions, snapshots, conf change, many clients (3B) ...
 	GenericTest(t, "3B", 5, true, true, true, 100, true, false)
+}
+
+func TestManualSplit(t *testing.T) {
+	cfg := config.NewTestConfig()
+	cluster := NewTestCluster(5, cfg)
+	cluster.Start()
+	defer cluster.Shutdown()
+	region := cluster.GetRegion([]byte(""))
+
+	cluster.MustTransferLeader(region.GetId(), NewPeer(1, 1))
+
+	cluster.MustPut([]byte("k1"), []byte("v1"))
+	cluster.MustPut([]byte("k2"), []byte("v2"))
+	cluster.MustPut([]byte("k3"), []byte("v3"))
+	cluster.MustPut([]byte("k4"), []byte("v4"))
+	cluster.MustPut([]byte("k5"), []byte("v5"))
+
+	resp, err := cluster.schedulerClient.AskSplit(context.TODO(), region)
+	if err != nil {
+		t.Fatalf("failed to ask split: %v", err)
+	}
+	cmd := &raft_cmdpb.RaftCmdRequest{
+		Header: &raft_cmdpb.RaftRequestHeader{
+			RegionId:    region.Id,
+			Peer:        region.Peers[0],
+			RegionEpoch: region.RegionEpoch,
+		},
+		AdminRequest: &raft_cmdpb.AdminRequest{
+			CmdType: raft_cmdpb.AdminCmdType_Split,
+			Split: &raft_cmdpb.SplitRequest{
+				SplitKey:    []byte("k3"),
+				NewRegionId: resp.NewRegionId,
+				NewPeerIds:  resp.NewPeerIds,
+			},
+		},
+	}
+	cmdResp, _ := cluster.CallCommandOnLeader(cmd, time.Second)
+	assert.Nil(t, cmdResp.GetHeader().GetError())
+	assert.Nil(t, cmdResp.GetHeader().GetError().GetKeyNotInRegion())
+
+	left := cluster.GetRegion([]byte("k1"))
+	right := cluster.GetRegion([]byte("k3"))
+
+	assert.True(t, bytes.Equal(region.GetStartKey(), left.GetStartKey()))
+	assert.True(t, bytes.Equal(left.GetEndKey(), right.GetStartKey()))
+	assert.True(t, bytes.Equal(right.GetEndKey(), region.GetEndKey()))
 }
 
 func TestOneSplit3B(t *testing.T) {

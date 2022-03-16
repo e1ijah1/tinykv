@@ -53,6 +53,16 @@ func newStoreMeta() *storeMeta {
 	}
 }
 
+func (m *storeMeta) split(oldRegion, newRegion1, newRegion2 *metapb.Region) {
+	m.Lock()
+	defer m.Unlock()
+	m.regionRanges.Delete(&regionItem{region: oldRegion})
+	m.regionRanges.ReplaceOrInsert(&regionItem{region: newRegion1})
+	m.regionRanges.ReplaceOrInsert(&regionItem{region: newRegion2})
+	m.regions[newRegion1.Id] = newRegion1
+	m.regions[newRegion2.Id] = newRegion2
+}
+
 func (m *storeMeta) changeRegionPeer(region *metapb.Region, peer *metapb.Peer, addPeer bool) {
 	region.RegionEpoch.ConfVer++
 	if addPeer {
