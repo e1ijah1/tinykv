@@ -284,6 +284,11 @@ func (d *peerMsgHandler) applySplit(kvWb *engine_util.WriteBatch, req *raft_cmdp
 	newRegion := util.CopyRegion(originRegion, req)
 	originRegion.EndKey = req.SplitKey
 
+	// log.Infof("[region %d] node %d apply split to [%s,%s,%s],\noldRegionId %+v,\nnewRegionId %+v",
+	// 	d.Region().Id, d.RaftGroup.Raft.ID(),
+	// 	d.Region().StartKey, req.SplitKey, d.Region().EndKey,
+	// 	originRegion, newRegion)
+
 	// update global meta
 	d.ctx.storeMeta.split(d.Region(), originRegion, newRegion)
 	d.peerStorage.SetRegion(originRegion)

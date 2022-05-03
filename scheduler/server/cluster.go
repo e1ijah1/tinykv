@@ -276,10 +276,60 @@ func (c *RaftCluster) handleStoreHeartbeat(stats *schedulerpb.StoreStats) error 
 	return nil
 }
 
+func (c *RaftCluster) checkStaleRegion(region *core.RegionInfo) bool {
+	regionEpoch := region.GetRegionEpoch()
+	localRegion := c.core.GetRegion(region.GetID())
+	if localRegion == nil {
+		return true
+	}
+	// If the leader changed,  it cannot be skipped
+	if region.GetLeader().Id != localRegion.GetLeader().Id {
+		return true
+	}
+	// If the new one or original one has pending peer,  it cannot be skipped
+	if len(localRegion.GetPendingPeers()) > 0 || len(region.GetPendingPeers()) > 0 {
+		return true
+	}
+	// If the ApproximateSize changed, it cannot be skipped
+	if localRegion.GetApproximateSize() != region.GetApproximateSize() {
+		return true
+	}
+
+	epoch := localRegion.GetRegionEpoch()
+	if regionEpoch.GetConfVer() < epoch.GetConfVer() || regionEpoch.GetVersion() < epoch.GetVersion() {
+		return false
+	}
+	overlaps := c.core.GetOverlaps(region)
+	for _, r := range overlaps {
+		if regionEpoch.GetConfVer() < r.GetRegionEpoch().GetConfVer() ||
+			regionEpoch.GetVersion() < r.GetRegionEpoch().GetVersion() {
+			return false
+		}
+	}
+
+	return true
+}
+
 // processRegionHeartbeat updates the region information.
 func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	// Your Code Here (3C).
 
+	// check region in local storage
+	regionId := region.GetID()
+	if !c.checkStaleRegion(region) {
+		log.Info("region heartbeat is stale",
+			zap.Uint64("region-id", regionId),
+			zap.Reflect("region-info", region),
+		)
+		return nil
+	}
+
+	c.core.PutRegion(region)
+	storeIds := region.GetStoreIds()
+
+	for sid := range storeIds {
+		c.updateStoreStatusLocked(sid)
+	}
 	return nil
 }
 

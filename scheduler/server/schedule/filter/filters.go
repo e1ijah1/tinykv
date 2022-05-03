@@ -184,6 +184,8 @@ func (f StoreStateFilter) Type() string {
 // Source returns true when the store cannot be selected as the schedule
 // source.
 func (f StoreStateFilter) Source(opt opt.Options, store *core.StoreInfo) bool {
+	// a suitable store should be up and the down time cannot be longer than MaxStoreDownTime of the cluster, 
+	// which you can get through cluster.GetMaxStoreDownTime().
 	if store.IsTombstone() ||
 		store.DownTime() > opt.GetMaxStoreDownTime() {
 		return true

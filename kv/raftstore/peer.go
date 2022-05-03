@@ -127,6 +127,7 @@ func NewPeer(storeId uint64, cfg *config.Config, engines *engine_util.Engines, r
 
 	raftCfg := &raft.Config{
 		ID:            meta.GetId(),
+		RegionID:      region.GetId(),
 		ElectionTick:  cfg.RaftElectionTimeoutTicks,
 		HeartbeatTick: cfg.RaftHeartbeatTicks,
 		Applied:       appliedIndex,

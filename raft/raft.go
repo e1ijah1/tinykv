@@ -51,6 +51,9 @@ var ErrProposalDropped = errors.New("raft proposal dropped")
 
 // Config contains the parameters to start a raft.
 type Config struct {
+	// region id, for debug
+	RegionID uint64
+
 	// ID is the identity of the local raft. ID cannot be 0.
 	ID uint64
 
@@ -140,6 +143,8 @@ func (p *Progress) maybeDecrTo(rejected, matchHint uint64) bool {
 
 type Raft struct {
 	id uint64
+	// region id, for debug
+	regionID uint64
 
 	Term uint64
 	Vote uint64
@@ -347,7 +352,8 @@ func (r *Raft) tick() {
 				}
 			}
 			if alives < r.quorum() {
-				log.Errorf("node %d leader alive timeout, and has not enough alive followers, step down to follower", r.id)
+				log.Errorf("[region %d] node %d leader alive timeout, and has not enough alive followers, step down to follower",
+					r.regionID, r.id)
 				r.becomeFollower(r.Term, None)
 			}
 		}
