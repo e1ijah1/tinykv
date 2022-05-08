@@ -86,17 +86,12 @@ func (s *balanceRegionScheduler) Schedule(cluster opt.Cluster) *operator.Operato
 	// Your Code Here (3C).
 	stores := cluster.GetStores()
 	sources := filter.SelectSourceStores(stores, s.filters, cluster)
-	targets := filter.SelectTargetStores(stores, s.filters, cluster)
 
 	// the Scheduler will try the next store which has a smaller region size until all stores will have been tried.
 	sort.Slice(sources, func(l, r int) bool {
 		return sources[l].GetRegionSize() > sources[r].GetRegionSize()
 	})
-	sort.Slice(targets, func(l, r int) bool {
-		return targets[l].GetRegionSize() < targets[l].GetRegionSize()
-	})
 
-	dest := targets[0]
 	for i := 0; i < len(sources); i++ {
 		src := sources[i]
 		var region *core.RegionInfo
@@ -106,14 +101,38 @@ func (s *balanceRegionScheduler) Schedule(cluster opt.Cluster) *operator.Operato
 				log.Debug("cannot find suitable region in source store", zap.Uint64("store id", sources[i].GetID()))
 				break
 			}
-			// we have to make sure that the difference has to be bigger than two times the approximate size of the region,
-			// which ensures that after moving, the target store’s region size is still smaller than the original store.
-			if src.GetRegionSize()-dest.GetRegionSize() < 2*region.GetApproximateSize() {
-				log.Debugf("region size diff of source store and target store too small",
-					zap.Int64("diff", src.GetRegionSize()-dest.GetRegionSize()),
-					zap.Int64("region approximate size", region.GetApproximateSize()))
+
+			if len(region.GetStoreIds()) < cluster.GetMaxReplicas() {
+				log.Debug("store ids of region is less than max replicas", zap.Uint64("region id", region.GetID()))
 				continue
 			}
+			if op := s.transfer(src, region, cluster); op != nil {
+				return op
+			}
+		}
+	}
+
+	return nil
+}
+
+func (s *balanceRegionScheduler) transfer(src *core.StoreInfo, region *core.RegionInfo, cluster opt.Cluster) *operator.Operator {
+	filters := []filter.Filter{
+		filter.NewExcludedFilter(s.GetName(), nil, region.GetStoreIds()),
+		&filter.StoreStateFilter{ActionScope: s.GetName(), MoveRegion: true},
+	}
+
+	candidates := filter.SelectTargetStores(cluster.GetStores(), filters, cluster)
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].GetRegionSize() < candidates[j].GetRegionSize()
+	})
+	for _, dest := range candidates {
+		// we have to make sure that the difference has to be bigger than two times the approximate size of the region,
+		// which ensures that after moving, the target store’s region size is still smaller than the original store.
+		if src.GetRegionSize()-dest.GetRegionSize() < 2*region.GetApproximateSize() {
+			log.Debug("region size diff of source store and target store too small",
+				zap.Int64("diff", src.GetRegionSize()-dest.GetRegionSize()),
+				zap.Int64("region approximate size", region.GetApproximateSize()))
+			return nil
 		}
 
 		// If the difference is big enough,
@@ -124,7 +143,6 @@ func (s *balanceRegionScheduler) Schedule(cluster opt.Cluster) *operator.Operato
 		}
 		log.Debug("no operator created for selected stores", zap.String("scheduler", s.GetName()), zap.Uint64("source", src.GetID()), zap.Uint64("target", dest.GetID()))
 	}
-
 	return nil
 }
 

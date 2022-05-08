@@ -64,6 +64,7 @@ func (s *testBalanceRegionSchedulerSuite) TestReplicas13C(c *C) {
 	tc.AddRegionStore(4, 16)
 	// Add region 1 with leader in store 4.
 	tc.AddLeaderRegion(1, 4)
+	// leader balance 从最多 size 的 store 流向最少 size 的 store
 	testutil.CheckTransferPeerWithLeaderTransfer(c, sb.Schedule(tc), operator.OpBalance, 4, 1)
 
 	// Test stateFilter.
