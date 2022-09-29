@@ -1,4 +1,4 @@
-name: Makefile CI
+name: tester
 
 on:
   push:
@@ -37,9 +37,6 @@ jobs:
       
     - name: check project 3a
       run: make project3a
-      
-    - name: check project 3b
-      run: make project3b
       
     - name: check project 3c
       run: make project3c

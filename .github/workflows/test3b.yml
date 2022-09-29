@@ -1,0 +1,34 @@
+name: tester
+
+on:
+  push:
+    branches: [ "lab" ]
+  pull_request:
+    branches: [ "lab" ]
+
+jobs:
+  ut-linux-x86:
+    runs-on: ubuntu-latest
+    name: UT Test on Ubuntu/x64
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v3.3.0
+        with:
+          go-version: "1.19"
+
+      - uses: actions/cache@v3.0.8
+        name: Cache go mod
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-mo-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-mo-
+
+      - name: check project 3b
+        run: make project3b
+
